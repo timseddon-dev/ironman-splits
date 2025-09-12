@@ -193,7 +193,7 @@ for nm, grp in xy_df.sort_values(["name", "leader_min"]).groupby("name"):
         showlegend=False,
     )
 
-# Axes: whole-minute ticks; Y reversed so 0 at top; no minus sign on labels
+# Axes: whole-minute ticks; Y reversed so 0 at top; labels without minus sign
 x_ticks = minute_ticks(xy_df["leader_min"], min_step=1)
 y_ticks = minute_ticks(xy_df["neg_gap_min"], min_step=1)  # these are <= 0 (and possibly 0)
 
@@ -203,17 +203,24 @@ fig.update_xaxes(
     ticktext=[f"{int(v)}" for v in x_ticks],
 )
 
-if y_ticks:
-    top = max(0, max(y_ticks))
-    bottom = min(y_ticks)
-    fig.update_yaxes(
-        title="Time behind leader (minutes)",
-        tickvals=y_ticks,
-        ticktext=[f"{abs(int(v))}" for v in y_ticks],
-        range=[top, bottom],  # reverse: 0 at top, more behind downward
-    )
-else:
-    fig.update_yaxes(title="Time behind leader (minutes)")
+# If minute_ticks returned no values, fall back to a derived range
+if not y_ticks:
+    y_min = float(xy_df["neg_gap_min"].min())
+    y_max = float(xy_df["neg_gap_min"].max())  # should be <= 0
+    y_ticks = list(range(math.floor(y_min), math.ceil(y_max) + 1, 1))
+
+# Force labels without minus sign and reverse axis so 0 is at the top
+top = 0  # leader is always 0
+bottom = min(y_ticks) if y_ticks else -1
+fig.update_yaxes(
+    title="Time behind leader (minutes)",
+    tickvals=y_ticks,
+    ticktext=[f"{abs(int(v))}" for v in y_ticks],  # absolute values only
+    range=[top, bottom],  # reversed axis: 0 at top, more behind downward
+    autorange=False,
+    zeroline=True,
+    zerolinecolor="#bbb",
+)
 
 fig.update_layout(height=650, margin=dict(l=40, r=20, t=30, b=40))
 st.plotly_chart(fig, use_container_width=True)
