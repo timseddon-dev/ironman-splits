@@ -246,17 +246,43 @@ for _, row in last_points.iterrows():
 # ======================================
 # 5) Axes and Layout
 # ======================================
-# X ticks: whole minutes (thinned to every 5 for readability)
+# X ticks: whole minutes (thinned to every 5 for readability) and force X to start at 0
 x_ticks_all = minute_ticks(xy_df["leader_min"], min_step=1)
 x_ticks = [v for v in x_ticks_all if v % 5 == 0] or x_ticks_all
+
+# Compute a clean X max to include the last data point and the label offset
+x_max = float(xy_df["leader_min"].max())
+x_span = max(1.0, x_max - float(xy_df["leader_min"].min()))
+label_dx = max(0.01 * x_span, 2.0)  # same as used for labels
+x_right = x_max + label_dx + 1.0     # a little padding after labels
+
 fig.update_xaxes(
     tickmode="array",
     tickvals=x_ticks,
     ticktext=[str(int(v)) for v in x_ticks],
     title="Leader elapsed (minutes)",
+    range=[0, x_right],   # begin X at 0
+    zeroline=True,
+    zerolinecolor="#bbb",
     showline=True,
     mirror=True,
     ticks="outside",
+    anchor="y",
+)
+
+# Ensure Y crosses X at 0 (i.e., the y-axis intercepts x at 0)
+fig.update_layout(
+    xaxis=dict(
+        range=[0, x_right],
+        zeroline=True,
+        zerolinecolor="#bbb",
+        constrain="domain",  # keep plot within the domain
+    ),
+    yaxis=dict(
+        anchor="x",
+        zeroline=True,
+        zerolinecolor="#bbb",
+    ),
 )
 
 # Y ticks: display absolute values (no minus sign); keep orientation as-is
