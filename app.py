@@ -173,28 +173,28 @@ leaders = compute_leaders(df)
 sel = df[df["name"].isin(selected) & df["split"].isin(range_splits)].copy()
 xy_df = sel.merge(leaders, on="split", how="left").dropna(subset=["net_td", "leader_td"])
 
-# X: leader elapsed minutes at split
-xy_df["leader_min"] = xy_df["leader_td"].dt.total_seconds() / 60.0
-# Y: leader - athlete (leader = 0; others negative)
+# X: leader elapsed hours at split
+xy_df["leader_hr"] = xy_df["leader_td"].dt.total_seconds() / 3600.0
+
+# Y: leader - athlete in minutes (leader = 0; others negative)
 xy_df["y_gap_min"] = (xy_df["leader_td"] - xy_df["net_td"]).dt.total_seconds() / 60.0
 
 # Add (0,0) starting anchor for each selected athlete
 if len(selected):
     anchors = pd.DataFrame({
         "name": selected,
-        "leader_min": 0.0,
+        "leader_hr": 0.0,
         "y_gap_min": 0.0,
         "split": "START"
     })
     xy_df = pd.concat([anchors, xy_df], ignore_index=True, sort=False)
 
 # Sort for consistent line drawing
-xy_df = xy_df.sort_values(["name", "leader_min"])
+xy_df = xy_df.sort_values(["name", "leader_hr"])
 
 if xy_df.empty:
     st.info("No rows to plot for the current selection. Try selecting more athletes or splits.")
     st.stop()
-
 
 # ======================================
 # 4) Plot: Scatter + Lines + End Labels
@@ -202,17 +202,17 @@ if xy_df.empty:
 # Main scatter markers
 fig = px.scatter(
     xy_df,
-    x="leader_min",
+    x="leader_hr",
     y="y_gap_min",
     color="name",
-    hover_data={"name": True, "split": True, "leader_min": ":.2f", "y_gap_min": ":.2f"},
-    labels={"leader_min": "Leader elapsed (minutes)", "y_gap_min": "Time behind leader (minutes)"},
+    hover_data={"name": True, "split": True, "leader_hr": ":.2f", "y_gap_min": ":.2f"},
+    labels={"leader_hr": "Leader elapsed (hours)", "y_gap_min": "Time behind leader (minutes)"},
 )
 
 # Connect points per athlete (lines)
 for nm, grp in xy_df.groupby("name"):
     fig.add_scatter(
-        x=grp["leader_min"],
+        x=grp["leader_hr"],
         y=grp["y_gap_min"],
         mode="lines",
         line=dict(width=1),
@@ -223,17 +223,17 @@ for nm, grp in xy_df.groupby("name"):
 # End-of-series labels to the right using separate text traces
 last_points = (
     xy_df.groupby("name", as_index=False)
-         .apply(lambda g: g.sort_values("leader_min").tail(1))
-         .reset_index(drop=True)[["name", "leader_min", "y_gap_min"]]
+         .apply(lambda g: g.sort_values("leader_hr").tail(1))
+         .reset_index(drop=True)[["name", "leader_hr", "y_gap_min"]]
 )
 
-# Offset labels to the right by a fraction of the X-span (min 2 minutes)
-x_span = max(1.0, float(xy_df["leader_min"].max() - xy_df["leader_min"].min()))
-label_dx = max(0.01 * x_span, 2.0)
+# Offset labels to the right by a fraction of the X-span (min ~0.05 h ≈ 3 minutes)
+x_span = max(1e-6, float(xy_df["leader_hr"].max() - xy_df["leader_hr"].min()))
+label_dx = max(0.01 * x_span, 0.05)
 
 for _, row in last_points.iterrows():
     fig.add_scatter(
-        x=[row["leader_min"] + label_dx],
+        x=[row["leader_hr"] + label_dx],
         y=[row["y_gap_min"]],
         mode="text",
         text=[row["name"]],
@@ -242,26 +242,36 @@ for _, row in last_points.iterrows():
         showlegend=False,
         hoverinfo="skip",
     )
-
+# ======================================
 # ======================================
 # 5) Axes and Layout
 # ======================================
-# X ticks: whole minutes (thinned to every 5 for readability) and force X to start at 0
-x_ticks_all = minute_ticks(xy_df["leader_min"], min_step=1)
-x_ticks = [v for v in x_ticks_all if v % 5 == 0] or x_ticks_all
+# X ticks in hours (every 0.5 h by default). Begin at 0 and extend past labels.
+def hour_ticks(series, step=0.5):
+    if series.empty:
+        return []
+    lo, hi = float(series.min()), float(series.max())
+    start = math.floor(lo / step) * step
+    end = math.ceil(hi / step) * step
+    vals, v = [], start
+    while v <= end + 1e-9:
+        vals.append(round(v, 6))
+        v += step
+    return vals
 
-# Compute a clean X max to include the last data point and the label offset
-x_max = float(xy_df["leader_min"].max())
-x_span = max(1.0, x_max - float(xy_df["leader_min"].min()))
-label_dx = max(0.01 * x_span, 2.0)  # same as used for labels
-x_right = x_max + label_dx + 1.0     # a little padding after labels
+x_ticks_all = hour_ticks(xy_df["leader_hr"], step=0.5)
+
+x_max = float(xy_df["leader_hr"].max())
+x_span = max(1e-6, x_max - float(xy_df["leader_hr"].min()))
+label_dx = max(0.01 * x_span, 0.05)  # same as used for label offset
+x_right = x_max + label_dx + 0.05
 
 fig.update_xaxes(
     tickmode="array",
-    tickvals=x_ticks,
-    ticktext=[str(int(v)) for v in x_ticks],
-    title="Leader elapsed (minutes)",
-    range=[0, x_right],   # begin X at 0
+    tickvals=x_ticks_all,
+    ticktext=[f"{v:.1f}" for v in x_ticks_all],  # 0.0, 0.5, 1.0, ...
+    title="Leader elapsed (hours)",
+    range=[0.0, x_right],  # begin X at 0
     zeroline=True,
     zerolinecolor="#bbb",
     showline=True,
@@ -270,22 +280,7 @@ fig.update_xaxes(
     anchor="y",
 )
 
-# Ensure Y crosses X at 0 (i.e., the y-axis intercepts x at 0)
-fig.update_layout(
-    xaxis=dict(
-        range=[0, x_right],
-        zeroline=True,
-        zerolinecolor="#bbb",
-        constrain="domain",  # keep plot within the domain
-    ),
-    yaxis=dict(
-        anchor="x",
-        zeroline=True,
-        zerolinecolor="#bbb",
-    ),
-)
-
-# Y ticks: display absolute values (no minus sign); keep orientation as-is
+# Y-axis: display absolute values (no minus sign); orientation unchanged
 y_min_val = float(xy_df["y_gap_min"].min())
 y_max_val = float(xy_df["y_gap_min"].max())
 y_start = math.floor(min(y_min_val, 0))
@@ -303,7 +298,23 @@ fig.update_yaxes(
     zerolinecolor="#bbb",
 )
 
-fig.update_layout(height=650, margin=dict(l=40, r=120, t=30, b=40))  # extra right margin for labels
+# Keep the Y axis intercepting X at 0
+fig.update_layout(
+    xaxis=dict(
+        range=[0.0, x_right],
+        zeroline=True,
+        zerolinecolor="#bbb",
+        constrain="domain",
+    ),
+    yaxis=dict(
+        anchor="x",
+        zeroline=True,
+        zerolinecolor="#bbb",
+    ),
+    height=650,
+    margin=dict(l=40, r=120, t=30, b=40),  # extra right margin for labels
+)
+
 st.plotly_chart(fig, use_container_width=True)
 
 
