@@ -159,18 +159,44 @@ xy_df["leader_min"] = xy_df["leader_td"].dt.total_seconds() / 60.0
 # Y: leader - athlete (leader = 0; others negative)
 xy_df["y_gap_min"] = (xy_df["leader_td"] - xy_df["net_td"]).dt.total_seconds() / 60.0
 
-# Simple scatter with connecting lines; no Y-axis tweaks
-import plotly.express as px
+# 2) Add (0,0) starting point for every athlete so each series starts at origin
+# Build one synthetic row per selected athlete at x=0, y=0
+if len(selected):
+    anchors = pd.DataFrame({
+        "name": selected,
+        "leader_min": 0.0,
+        "y_gap_min": 0.0,
+        "split": "START"
+    })
+    # Ensure same columns exist to avoid plotly complaining; leader_td/net_td not needed for plotting
+    xy_df = pd.concat([anchors, xy_df], ignore_index=True, sort=False)
+
+# 3) Prepare end-of-series labels: get the last x for each athlete and attach their name
+last_points = (
+    xy_df.sort_values(["name", "leader_min"])
+         .groupby("name", as_index=False)
+         .tail(1)[["name", "leader_min", "y_gap_min"]]
+)
+xy_df = xy_df.merge(
+    last_points.assign(label=lambda d: d["name"]),
+    how="left",
+    on=["name", "leader_min", "y_gap_min"]
+)
+# Only show text on the last point for each athlete, not all points
+xy_df["text"] = xy_df["label"]
+
+# Simple scatter with connecting lines
 fig = px.scatter(
     xy_df.sort_values(["name", "leader_min"]),
     x="leader_min",
     y="y_gap_min",
     color="name",
+    text="text",  # text only appears on last points
     hover_data={"name": True, "split": True, "leader_min": ":.2f", "y_gap_min": ":.2f"},
-    labels={"leader_min": "Leader elapsed (minutes)", "y_gap_min": "Leader - athlete (minutes)"},
+    labels={"leader_min": "Leader elapsed (minutes)", "y_gap_min": "Time behind leader (minutes)"},
 )
 
-# Connect points per athlete (no axis modifications)
+# Connect points per athlete
 for nm, grp in xy_df.sort_values(["name", "leader_min"]).groupby("name"):
     fig.add_scatter(
         x=grp["leader_min"],
@@ -181,6 +207,29 @@ for nm, grp in xy_df.sort_values(["name", "leader_min"]).groupby("name"):
         showlegend=False,
     )
 
+# 1) Display Y-axis labels without negative signs (keep data negative)
+# Build integer-minute ticks spanning data bounds
+import math
+y_min_val = float(xy_df["y_gap_min"].min())
+y_max_val = float(xy_df["y_gap_min"].max())
+y_start = math.floor(min(y_min_val, 0))  # most negative or 0
+y_end = math.ceil(max(y_max_val, 0))     # should be 0 for leaders
+y_ticks = list(range(y_start, y_end + 1, 1))
+fig.update_yaxes(
+    tickmode="array",
+    tickvals=y_ticks,
+    ticktext=[str(abs(int(v))) for v in y_ticks],  # remove minus sign
+    title="Time behind leader (minutes)",
+)
+
+# Make the end labels sit to the right of the point
+fig.update_traces(
+    textposition="middle right",
+    textfont=dict(size=12),
+    selector=dict(mode="markers")  # applied to the scatter with markers/text
+)
+
+fig.update_layout(height=650, margin=dict(l=40, r=20, t=30, b=40))
 st.plotly_chart(fig, use_container_width=True)
 
 
