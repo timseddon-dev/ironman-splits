@@ -9,7 +9,7 @@ import plotly.express as px
 
 st.set_page_config(page_title="Ironman Splits Viewer", layout="wide")
 
-# Try to autorefresh every 60 seconds so open sessions pull new data
+# Optional auto-refresh every 60 seconds
 try:
     from streamlit_autorefresh import st_autorefresh
     st_autorefresh(interval=60_000, limit=None, key="auto-refresh")
@@ -22,18 +22,18 @@ DATA_FILE = "long.csv"
 def load_data(path: str) -> pd.DataFrame:
     if not os.path.exists(path):
         return pd.DataFrame()
-    # Read very simply; the file is produced by rtrt_splits.py
     df = pd.read_csv(path)
-    # Keep only expected columns if more exist
+
+    # Keep expected columns
     keep = [c for c in ["name", "split", "netTime"] if c in df.columns]
     df = df[keep]
 
-    # Convert netTime string to Timedelta
+    # Parse netTime into timedelta
     def parse_td(x):
         if pd.isna(x):
             return pd.NaT
         s = str(x).strip()
-        # Normalize hour to HH if needed (e.g., 1:23:45 -> 01:23:45)
+        # Normalize 1:23:45 -> 01:23:45 for to_timedelta
         if re.fullmatch(r"\d:\d{2}:\d{2}(\.\d{1,3})?", s):
             s = "0" + s
         try:
@@ -42,12 +42,15 @@ def load_data(path: str) -> pd.DataFrame:
             return pd.NaT
 
     df["net_td"] = df["netTime"].apply(parse_td)
+
+    # Normalize text columns
+    df["name"] = df["name"].astype(str).str.strip()
+    df["split"] = df["split"].astype(str).str.strip().str.upper()
+
     return df
 
 def compute_time_behind_leader(df: pd.DataFrame) -> pd.DataFrame:
-    # Compute per-split leader and subtract
-    df = df.copy()
-    df = df.dropna(subset=["net_td"])
+    df = df.copy().dropna(subset=["net_td"])
     leaders = df.groupby("split")["net_td"].min().rename("leader_td")
     df = df.merge(leaders, on="split", how="left")
     df["behind_td"] = df["net_td"] - df["leader_td"]
@@ -64,27 +67,11 @@ def format_td(td: pd.Timedelta) -> str:
     return f"{sign}{h}:{m:02d}:{s:02d}" if h else f"{sign}{m}:{s:02d}"
 
 st.title("Ironman Splits Viewer")
-st.caption("Auto-updating via GitHub Actions. Data file: long.csv in this repo.")
+st.caption("Auto-updating via GitHub Actions every 5 minutes.")
 
 df = load_data(DATA_FILE)
-
-# Normalize essential columns early
-if not df.empty:
-    df["name"] = df["name"].astype(str).str.strip()
-    df["split"] = df["split"].astype(str).str.strip().str.upper()
-
-# Always show a small debug/status panel on the page
-st.write({
-    "csv_exists": os.path.exists(DATA_FILE),
-    "csv_size_bytes": os.path.getsize(DATA_FILE) if os.path.exists(DATA_FILE) else 0,
-    "rows_detected": int(df.shape[0]) if isinstance(df, pd.DataFrame) else 0,
-    "unique_names": int(df["name"].nunique()) if not df.empty else 0,
-    "unique_splits": int(df["split"].nunique()) if not df.empty else 0,
-    "sample_splits": sorted(df["split"].dropna().unique().tolist()[:10]) if not df.empty else [],
-})
-
 if df.empty:
-    st.warning("No data found yet. The scheduled job will populate long.csv shortly. Click Rerun after a minute.")
+    st.warning("No data found yet. The scheduled job will populate long.csv shortly. Try Rerun in a minute.")
     st.stop()
 
 # Expected logical split order
@@ -101,19 +88,19 @@ available_splits = [s for s in expected_splits if s in df["split"].unique()]
 if not available_splits:
     available_splits = sorted(df["split"].unique())
 
-left, right = st.columns([1,3])
+left, right = st.columns([1, 3], gap="large")
 
 with left:
     metric = st.radio("Metric", ["Time behind leader", "Net time"], index=0)
     names = sorted(df["name"].dropna().unique().tolist())
-    default_selection = names[:10] if len(names) >= 1 else []
-    selected = st.multiselect("Athletes", options=names, default=default_selection)
+    default_selection = names[:10] if len(names) > 0 else []
+    selected = st.multiselect("Athletes", options=names, default=default_selection, placeholder="Select athletes...")
 
-    split_start = st.selectbox("From split", options=available_splits, index=0 if available_splits else 0)
-    split_end = st.selectbox("To split", options=available_splits, index=(len(available_splits)-1) if available_splits else 0)
+    split_start = st.selectbox("From split", options=available_splits, index=0)
+    split_end = st.selectbox("To split", options=available_splits, index=len(available_splits) - 1)
 
 if not selected:
-    st.info("Select at least one athlete.")
+    st.info("Select at least one athlete to display the chart.")
     st.stop()
 
 def idx(s):
@@ -125,7 +112,7 @@ def idx(s):
 i0, i1 = idx(split_start), idx(split_end)
 if i0 > i1:
     i0, i1 = i1, i0
-range_splits = available_splits[i0:i1+1] if available_splits else []
+range_splits = available_splits[i0 : i1 + 1]
 
 sel = df[df["name"].isin(selected) & df["split"].isin(range_splits)].copy()
 
@@ -139,14 +126,11 @@ else:
     ytitle = "Net time"
 
 plot_df = plot_df.dropna(subset=[ycol])
-
-# Safety: if no rows after filtering, show a hint and stop
 if plot_df.empty:
     st.info("No rows to plot for the current selection. Try selecting more athletes or a wider split range.")
-    st.dataframe(df.head(50))
     st.stop()
 
-# Order splits
+# Order splits and prepare seconds
 plot_df["split"] = pd.Categorical(plot_df["split"], categories=available_splits, ordered=True)
 plot_df = plot_df.sort_values(["name", "split"])
 plot_df["y_seconds"] = plot_df[ycol].dt.total_seconds()
@@ -163,8 +147,10 @@ fig = px.line(
         "split": True,
         "y_seconds": False,
         "net": plot_df["net_td"].apply(format_td),
-        "behind": plot_df.get("behind_td", pd.Series([pd.NaT]*len(plot_df))).apply(format_td) if "behind_td" in plot_df else None,
-    }
+        "behind": plot_df.get("behind_td", pd.Series([pd.NaT] * len(plot_df))).apply(format_td)
+        if "behind_td" in plot_df
+        else None,
+    },
 )
 
 def tickfmt(sec):
@@ -173,19 +159,18 @@ def tickfmt(sec):
     m, s = divmod(rem, 60)
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 
-if len(plot_df):
-    ymin, ymax = float(plot_df["y_seconds"].min()), float(plot_df["y_seconds"].max())
-    span = max(1.0, ymax - ymin)
-    step = max(30, int(span // 12))
-    ticks = list(range(int(ymin), int(ymax) + 1, step))
-    fig.update_yaxes(tickvals=ticks, ticktext=[tickfmt(v) for v in ticks], title=ytitle)
-
+ymin, ymax = float(plot_df["y_seconds"].min()), float(plot_df["y_seconds"].max())
+span = max(1.0, ymax - ymin)
+step = max(30, int(span // 12))
+ticks = list(range(int(ymin), int(ymax) + 1, step))
+fig.update_yaxes(tickvals=ticks, ticktext=[tickfmt(v) for v in ticks], title=ytitle)
 fig.update_layout(height=650, margin=dict(l=40, r=20, t=30, b=40))
+
 st.plotly_chart(fig, use_container_width=True)
 
 with st.expander("Show data"):
     st.dataframe(
         sel.sort_values(["name", "split"])[["name", "split", "netTime"]].reset_index(drop=True),
         use_container_width=True,
-        height=320
+        height=320,
     )
