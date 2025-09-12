@@ -208,7 +208,7 @@ fig.update_yaxes(
     tickmode="array",
     tickvals=y_ticks,
 
-    range=[0, y_start],  # reversed: 0 at top to most negative at bottom
+   
     autorange=False,
     zeroline=True,
     zerolinecolor="#bbb",
