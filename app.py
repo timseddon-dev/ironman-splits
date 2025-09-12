@@ -1,3 +1,6 @@
+# ======================================
+# 0) Imports, Config, and Constants
+# ======================================
 # /// script
 # dependencies = ["streamlit", "pandas", "plotly-express"]
 # ///
@@ -19,6 +22,10 @@ except Exception:
 
 DATA_FILE = "long.csv"
 
+
+# ======================================
+# 1) Data Loading and Utilities
+# ======================================
 @st.cache_data(ttl=60)
 def load_data(path: str) -> pd.DataFrame:
     if not os.path.exists(path):
@@ -50,6 +57,7 @@ def load_data(path: str) -> pd.DataFrame:
 
     return df
 
+
 def expected_order():
     return (
         ["SWIM", "T1"]
@@ -59,6 +67,7 @@ def expected_order():
         + ["FINISH"]
     )
 
+
 def available_splits_in_order(df: pd.DataFrame):
     order = expected_order()
     present = [s for s in order if s in df["split"].unique()]
@@ -66,10 +75,12 @@ def available_splits_in_order(df: pd.DataFrame):
         return present
     return sorted(df["split"].dropna().unique().tolist())
 
-def compute_leader_by_split(df: pd.DataFrame) -> pd.DataFrame:
+
+def compute_leaders(df: pd.DataFrame) -> pd.DataFrame:
     d = df.dropna(subset=["net_td"]).copy()
     leaders = d.groupby("split", as_index=False)["net_td"].min().rename(columns={"net_td": "leader_td"})
     return leaders
+
 
 def latest_common_split(df: pd.DataFrame) -> str | None:
     if df.empty:
@@ -80,10 +91,12 @@ def latest_common_split(df: pd.DataFrame) -> str | None:
             return s
     return None
 
+
 def compute_positions(df: pd.DataFrame) -> pd.DataFrame:
     d = df.dropna(subset=["net_td"]).copy()
     d["pos"] = d.groupby("split")["net_td"].rank(method="first")
     return d
+
 
 def minute_ticks(series: pd.Series, min_step: int = 1):
     if series.empty:
@@ -94,9 +107,12 @@ def minute_ticks(series: pd.Series, min_step: int = 1):
     step = max(1, min_step)
     return list(range(start, end + 1, step))
 
-# UI
+
+# ======================================
+# 2) UI Setup
+# ======================================
 st.title("Ironman Splits Viewer")
-st.caption("XY view: X = leader elapsed (minutes). Y = minutes behind leader (0 at top).")
+st.caption("XY view: X = leader elapsed (minutes). Y = minutes behind leader (leader − athlete).")
 
 df = load_data(DATA_FILE)
 if df.empty:
@@ -149,8 +165,11 @@ if i0 > i1:
     i0, i1 = i1, i0
 range_splits = splits_order[i0:i1+1]
 
-# Merge leader times and compute Y = leader - athlete (minutes)
-leaders = df.groupby("split", as_index=False)["net_td"].min().rename(columns={"net_td": "leader_td"})
+
+# ======================================
+# 3) Data Prep For Plot
+# ======================================
+leaders = compute_leaders(df)
 sel = df[df["name"].isin(selected) & df["split"].isin(range_splits)].copy()
 xy_df = sel.merge(leaders, on="split", how="left").dropna(subset=["net_td", "leader_td"])
 
@@ -159,8 +178,7 @@ xy_df["leader_min"] = xy_df["leader_td"].dt.total_seconds() / 60.0
 # Y: leader - athlete (leader = 0; others negative)
 xy_df["y_gap_min"] = (xy_df["leader_td"] - xy_df["net_td"]).dt.total_seconds() / 60.0
 
-# 2) Add (0,0) starting point for every athlete so each series starts at origin
-# Build one synthetic row per selected athlete at x=0, y=0
+# Add (0,0) starting anchor for each selected athlete
 if len(selected):
     anchors = pd.DataFrame({
         "name": selected,
@@ -168,23 +186,22 @@ if len(selected):
         "y_gap_min": 0.0,
         "split": "START"
     })
-    # Ensure same columns exist to avoid plotly complaining; leader_td/net_td not needed for plotting
     xy_df = pd.concat([anchors, xy_df], ignore_index=True, sort=False)
 
-# 3) Prepare end-of-series labels and draw them as separate text traces to the right
-last_points = (
-    xy_df.sort_values(["name", "leader_min"])
-         .groupby("name", as_index=False)
-         .tail(1)[["name", "leader_min", "y_gap_min"]]
-)
+# Sort for consistent line drawing
+xy_df = xy_df.sort_values(["name", "leader_min"])
 
-# How far to push labels to the right (minutes). Scale with X-span for consistency.
-x_span = max(1.0, float(xy_df["leader_min"].max() - xy_df["leader_min"].min()))
-label_dx = max(0.01 * x_span, 2.0)  # at least 2 minutes to the right
+if xy_df.empty:
+    st.info("No rows to plot for the current selection. Try selecting more athletes or splits.")
+    st.stop()
 
-# Main scatter with markers (no text here)
+
+# ======================================
+# 4) Plot: Scatter + Lines + End Labels
+# ======================================
+# Main scatter markers
 fig = px.scatter(
-    xy_df.sort_values(["name", "leader_min"]),
+    xy_df,
     x="leader_min",
     y="y_gap_min",
     color="name",
@@ -192,8 +209,8 @@ fig = px.scatter(
     labels={"leader_min": "Leader elapsed (minutes)", "y_gap_min": "Time behind leader (minutes)"},
 )
 
-# Connect points per athlete
-for nm, grp in xy_df.sort_values(["name", "leader_min"]).groupby("name"):
+# Connect points per athlete (lines)
+for nm, grp in xy_df.groupby("name"):
     fig.add_scatter(
         x=grp["leader_min"],
         y=grp["y_gap_min"],
@@ -203,7 +220,17 @@ for nm, grp in xy_df.sort_values(["name", "leader_min"]).groupby("name"):
         showlegend=False,
     )
 
-# Add a separate text trace for each athlete's last point, nudged to the right
+# End-of-series labels to the right using separate text traces
+last_points = (
+    xy_df.groupby("name", as_index=False)
+         .apply(lambda g: g.sort_values("leader_min").tail(1))
+         .reset_index(drop=True)[["name", "leader_min", "y_gap_min"]]
+)
+
+# Offset labels to the right by a fraction of the X-span (min 2 minutes)
+x_span = max(1.0, float(xy_df["leader_min"].max() - xy_df["leader_min"].min()))
+label_dx = max(0.01 * x_span, 2.0)
+
 for _, row in last_points.iterrows():
     fig.add_scatter(
         x=[row["leader_min"] + label_dx],
@@ -216,8 +243,23 @@ for _, row in last_points.iterrows():
         hoverinfo="skip",
     )
 
-# Y-axis labels without minus signs
-import math
+# ======================================
+# 5) Axes and Layout
+# ======================================
+# X ticks: whole minutes (thinned to every 5 for readability)
+x_ticks_all = minute_ticks(xy_df["leader_min"], min_step=1)
+x_ticks = [v for v in x_ticks_all if v % 5 == 0] or x_ticks_all
+fig.update_xaxes(
+    tickmode="array",
+    tickvals=x_ticks,
+    ticktext=[str(int(v)) for v in x_ticks],
+    title="Leader elapsed (minutes)",
+    showline=True,
+    mirror=True,
+    ticks="outside",
+)
+
+# Y ticks: display absolute values (no minus sign); keep orientation as-is
 y_min_val = float(xy_df["y_gap_min"].min())
 y_max_val = float(xy_df["y_gap_min"].max())
 y_start = math.floor(min(y_min_val, 0))
@@ -228,22 +270,25 @@ fig.update_yaxes(
     tickvals=y_ticks,
     ticktext=[str(abs(int(v))) for v in y_ticks],
     title="Time behind leader (minutes)",
+    showline=True,
+    mirror=True,
+    ticks="outside",
+    zeroline=True,
+    zerolinecolor="#bbb",
 )
 
-# Make the end labels sit to the right of the point
-fig.update_traces(
-    textposition="middle right",
-    textfont=dict(size=12),
-    selector=dict(mode="markers")  # applied to the scatter with markers/text
-)
-
-fig.update_layout(height=650, margin=dict(l=40, r=20, t=30, b=40))
+fig.update_layout(height=650, margin=dict(l=40, r=120, t=30, b=40))  # extra right margin for labels
 st.plotly_chart(fig, use_container_width=True)
 
 
+# ======================================
+# 6) Data Table
+# ======================================
 with st.expander("Show data"):
     st.dataframe(
-        sel.sort_values(["name", "split"])[["name", "split", "netTime"]].reset_index(drop=True),
+        df[df["name"].isin(selected) & df["split"].isin(range_splits)]
+          .sort_values(["name", "split"])[["name", "split", "netTime"]]
+          .reset_index(drop=True),
         use_container_width=True,
         height=320,
     )
