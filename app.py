@@ -149,76 +149,40 @@ if i0 > i1:
     i0, i1 = i1, i0
 range_splits = splits_order[i0:i1+1]
 
-# Compute leader elapsed and negative gap (leader - athlete)
-leaders = compute_leader_by_split(df)
+# Merge leader times and compute Y = leader - athlete (minutes)
+leaders = df.groupby("split", as_index=False)["net_td"].min().rename(columns={"net_td": "leader_td"})
 sel = df[df["name"].isin(selected) & df["split"].isin(range_splits)].copy()
 xy_df = sel.merge(leaders, on="split", how="left").dropna(subset=["net_td", "leader_td"])
 
-# X: leader elapsed minutes
+# X: leader elapsed minutes at split
 xy_df["leader_min"] = xy_df["leader_td"].dt.total_seconds() / 60.0
-# Y: negative gap minutes (leader - athlete), clamp tiny noise to 0
-xy_df["neg_gap_min"] = (xy_df["leader_td"] - xy_df["net_td"]).dt.total_seconds() / 60.0
-xy_df.loc[xy_df["neg_gap_min"].between(-1e-6, 1e-6), "neg_gap_min"] = 0.0
+# Y: leader - athlete (leader = 0; others negative)
+xy_df["y_gap_min"] = (xy_df["leader_td"] - xy_df["net_td"]).dt.total_seconds() / 60.0
 
-if xy_df.empty:
-    st.info("No rows to plot for the current selection. Try selecting more athletes or splits.")
-    st.stop()
-
-# Scatter + lines per athlete
-xy_df = xy_df.sort_values(["name", "leader_min"])
+# Simple scatter with connecting lines; no Y-axis tweaks
+import plotly.express as px
 fig = px.scatter(
-    xy_df,
+    xy_df.sort_values(["name", "leader_min"]),
     x="leader_min",
-    y="neg_gap_min",
+    y="y_gap_min",
     color="name",
-    hover_data={"name": True, "split": True, "leader_min": ":.2f", "neg_gap_min": ":.2f"},
+    hover_data={"name": True, "split": True, "leader_min": ":.2f", "y_gap_min": ":.2f"},
+    labels={"leader_min": "Leader elapsed (minutes)", "y_gap_min": "Leader - athlete (minutes)"},
 )
 
-# Connect points with lines per athlete
-for nm, grp in xy_df.groupby("name"):
+# Connect points per athlete (no axis modifications)
+for nm, grp in xy_df.sort_values(["name", "leader_min"]).groupby("name"):
     fig.add_scatter(
         x=grp["leader_min"],
-        y=grp["neg_gap_min"],
+        y=grp["y_gap_min"],
         mode="lines",
         line=dict(width=1),
         name=nm,
         showlegend=False,
     )
 
-# X ticks: whole minutes; thin to every 5 minutes
-x_ticks_all = minute_ticks(xy_df["leader_min"], min_step=1)
-x_ticks = [v for v in x_ticks_all if v % 5 == 0] or x_ticks_all
-fig.update_xaxes(
-    title="Leader elapsed (minutes)",
-    tickmode="array",
-    tickvals=x_ticks,
-    ticktext=[str(int(v)) for v in x_ticks],
-    showline=True,
-    mirror=True,
-    ticks="outside",
-)
-
-# Y ticks: use integer minutes from data (negative to 0), labels as absolute values, reversed so 0 at top
-y_min_val = float(xy_df["neg_gap_min"].min())
-y_start = math.floor(y_min_val)   # e.g., -21
-y_end = 0
-y_ticks = list(range(y_start, y_end + 1, 1))
-fig.update_yaxes(
-    title="Time behind leader (minutes)",
-    tickmode="array",
-    tickvals=y_ticks,
-    ticktext=[str(abs(int(v))) for v in y_ticks],  # no minus sign
-    range=[0, y_start],  # reversed: 0 at top to most negative at bottom
-    autorange=False,
-    zeroline=True,
-    zerolinecolor="#bbb",
-    showline=True,
-    mirror=True,
-    ticks="outside",
-)
-
-fig.update_layout(height=650, margin=dict(l=40, r=20, t=30, b=40))
 st.plotly_chart(fig, use_container_width=True)
+
 
 with st.expander("Show data"):
     st.dataframe(
