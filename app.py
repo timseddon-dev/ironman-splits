@@ -169,6 +169,12 @@ if xy_df.empty:
     st.stop()
 
 # Scatter + connecting lines per athlete
+# Ensure neg_gap_min is <= 0 (leader=0, others negative)
+xy_df["neg_gap_min"] = (xy_df["leader_td"] - xy_df["net_td"]).dt.total_seconds() / 60.0
+# Safety: clamp tiny floating noise (e.g., -1e-12) to 0
+xy_df.loc[xy_df["neg_gap_min"].between(-1e-6, 1e-6), "neg_gap_min"] = 0.0
+st.write({"y_min": float(xy_df["neg_gap_min"].min()), "y_max": float(xy_df["neg_gap_min"].max())})
+
 fig = px.scatter(
     xy_df.sort_values(["name", "leader_min"]),
     x="leader_min",
