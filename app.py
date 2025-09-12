@@ -218,14 +218,24 @@ if not y_ticks:
 # Force labels without minus sign and reverse axis so 0 is at the top
 top = 0  # leader is always 0
 bottom = min(y_ticks) if y_ticks else -1
+# Y-axis: build integer-minute ticks from the actual data and force reversed range
+y_min_val = float(xy_df["neg_gap_min"].min())  # negative
+y_start = math.floor(y_min_val)                # e.g., -21
+y_end = 0                                      # leader at 0
+y_ticks = list(range(y_start, y_end + 1, 1))   # [-21, -20, ..., 0]
+
 fig.update_yaxes(
     title="Time behind leader (minutes)",
+    tickmode="array",
     tickvals=y_ticks,
-    ticktext=[f"{abs(int(v))}" for v in y_ticks],  # absolute values only
-    range=[top, bottom],  # reversed axis: 0 at top, more behind downward
+    ticktext=[str(abs(int(v))) for v in y_ticks],  # show absolute minutes (no minus)
+    range=[0, y_start],    # reversed: 0 at top to most negative at bottom
     autorange=False,
     zeroline=True,
     zerolinecolor="#bbb",
+    showline=True,
+    mirror=True,
+    ticks="outside",
 )
 
 fig.update_layout(height=650, margin=dict(l=40, r=20, t=30, b=40))
