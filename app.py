@@ -199,7 +199,7 @@ if xy_df.empty:
 # ======================================
 # 4) Plot: Scatter + Lines + End Labels
 # ======================================
-# Main scatter markers
+# Main scatter markers (legend will be disabled in layout below)
 fig = px.scatter(
     xy_df,
     x="leader_hr",
@@ -242,7 +242,7 @@ for _, row in last_points.iterrows():
         showlegend=False,
         hoverinfo="skip",
     )
-# ======================================
+
 # ======================================
 # 5) Axes and Layout
 # ======================================
@@ -298,7 +298,7 @@ fig.update_yaxes(
     zerolinecolor="#bbb",
 )
 
-# Keep the Y axis intercepting X at 0
+# Keep the Y axis intercepting X at 0 and hide the legend (since series are labeled)
 fig.update_layout(
     xaxis=dict(
         range=[0.0, x_right],
@@ -311,8 +311,9 @@ fig.update_layout(
         zeroline=True,
         zerolinecolor="#bbb",
     ),
+    showlegend=False,   # <— remove legend
     height=650,
-    margin=dict(l=40, r=120, t=30, b=40),  # extra right margin for labels
+    margin=dict(l=40, r=120, t=30, b=40),
 )
 
 st.plotly_chart(fig, use_container_width=True)
