@@ -207,7 +207,7 @@ fig.update_yaxes(
     title="Time behind leader (minutes)",
     tickmode="array",
     tickvals=y_ticks,
-    ticktext=[str(abs(int(v))) for v in y_ticks],  # no minus sign
+
     range=[0, y_start],  # reversed: 0 at top to most negative at bottom
     autorange=False,
     zeroline=True,
