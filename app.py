@@ -171,27 +171,23 @@ if len(selected):
     # Ensure same columns exist to avoid plotly complaining; leader_td/net_td not needed for plotting
     xy_df = pd.concat([anchors, xy_df], ignore_index=True, sort=False)
 
-# 3) Prepare end-of-series labels: get the last x for each athlete and attach their name
+# 3) Prepare end-of-series labels and draw them as separate text traces to the right
 last_points = (
     xy_df.sort_values(["name", "leader_min"])
          .groupby("name", as_index=False)
          .tail(1)[["name", "leader_min", "y_gap_min"]]
 )
-xy_df = xy_df.merge(
-    last_points.assign(label=lambda d: d["name"]),
-    how="left",
-    on=["name", "leader_min", "y_gap_min"]
-)
-# Only show text on the last point for each athlete, not all points
-xy_df["text"] = xy_df["label"]
 
-# Simple scatter with connecting lines
+# How far to push labels to the right (minutes). Scale with X-span for consistency.
+x_span = max(1.0, float(xy_df["leader_min"].max() - xy_df["leader_min"].min()))
+label_dx = max(0.01 * x_span, 2.0)  # at least 2 minutes to the right
+
+# Main scatter with markers (no text here)
 fig = px.scatter(
     xy_df.sort_values(["name", "leader_min"]),
     x="leader_min",
     y="y_gap_min",
     color="name",
-    text="text",  # text only appears on last points
     hover_data={"name": True, "split": True, "leader_min": ":.2f", "y_gap_min": ":.2f"},
     labels={"leader_min": "Leader elapsed (minutes)", "y_gap_min": "Time behind leader (minutes)"},
 )
@@ -207,18 +203,30 @@ for nm, grp in xy_df.sort_values(["name", "leader_min"]).groupby("name"):
         showlegend=False,
     )
 
-# 1) Display Y-axis labels without negative signs (keep data negative)
-# Build integer-minute ticks spanning data bounds
+# Add a separate text trace for each athlete's last point, nudged to the right
+for _, row in last_points.iterrows():
+    fig.add_scatter(
+        x=[row["leader_min"] + label_dx],
+        y=[row["y_gap_min"]],
+        mode="text",
+        text=[row["name"]],
+        textposition="middle left",
+        textfont=dict(size=12),
+        showlegend=False,
+        hoverinfo="skip",
+    )
+
+# Y-axis labels without minus signs
 import math
 y_min_val = float(xy_df["y_gap_min"].min())
 y_max_val = float(xy_df["y_gap_min"].max())
-y_start = math.floor(min(y_min_val, 0))  # most negative or 0
-y_end = math.ceil(max(y_max_val, 0))     # should be 0 for leaders
+y_start = math.floor(min(y_min_val, 0))
+y_end = math.ceil(max(y_max_val, 0))
 y_ticks = list(range(y_start, y_end + 1, 1))
 fig.update_yaxes(
     tickmode="array",
     tickvals=y_ticks,
-    ticktext=[str(abs(int(v))) for v in y_ticks],  # remove minus sign
+    ticktext=[str(abs(int(v))) for v in y_ticks],
     title="Time behind leader (minutes)",
 )
 
