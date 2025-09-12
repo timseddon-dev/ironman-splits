@@ -203,33 +203,37 @@ for nm, grp in xy_df.sort_values(["name", "leader_min"]).groupby("name"):
 x_ticks = minute_ticks(xy_df["leader_min"], min_step=1)
 y_ticks = minute_ticks(xy_df["neg_gap_min"], min_step=1)  # these are <= 0 (and possibly 0)
 
+
+# Force leader=0 and others negative (minutes); clamp tiny float noise
+xy_df["neg_gap_min"] = (xy_df["leader_td"] - xy_df["net_td"]).dt.total_seconds() / 60.0
+xy_df.loc[xy_df["neg_gap_min"].between(-1e-6, 1e-6), "neg_gap_min"] = 0.0
+
+# X ticks: whole minutes; thin to every 5 minutes for readability
+x_ticks = minute_ticks(xy_df["leader_min"], min_step=1)
+x_ticks_5 = [v for v in x_ticks if v % 5 == 0] or x_ticks
+
 fig.update_xaxes(
     title="Leader elapsed (minutes)",
-    tickvals=x_ticks,
-    ticktext=[f"{int(v)}" for v in x_ticks],
+    tickmode="array",
+    tickvals=x_ticks_5,
+    ticktext=[str(int(v)) for v in x_ticks_5],
+    showline=True,
+    mirror=True,
+    ticks="outside",
 )
 
-# If minute_ticks returned no values, fall back to a derived range
-if not y_ticks:
-    y_min = float(xy_df["neg_gap_min"].min())
-    y_max = float(xy_df["neg_gap_min"].max())  # should be <= 0
-    y_ticks = list(range(math.floor(y_min), math.ceil(y_max) + 1, 1))
-
-# Force labels without minus sign and reverse axis so 0 is at the top
-top = 0  # leader is always 0
-bottom = min(y_ticks) if y_ticks else -1
-# Y-axis: build integer-minute ticks from the actual data and force reversed range
-y_min_val = float(xy_df["neg_gap_min"].min())  # negative
+# Y ticks: build from data extents (negative up to 0), labels as absolute values
+y_min_val = float(xy_df["neg_gap_min"].min())  # negative or 0
 y_start = math.floor(y_min_val)                # e.g., -21
-y_end = 0                                      # leader at 0
-y_ticks = list(range(y_start, y_end + 1, 1))   # [-21, -20, ..., 0]
+y_end = 0
+y_ticks = list(range(y_start, y_end + 1, 1))   # [-21, ..., 0]
 
 fig.update_yaxes(
     title="Time behind leader (minutes)",
     tickmode="array",
     tickvals=y_ticks,
-    ticktext=[str(abs(int(v))) for v in y_ticks],  # show absolute minutes (no minus)
-    range=[0, y_start],    # reversed: 0 at top to most negative at bottom
+    ticktext=[str(abs(int(v))) for v in y_ticks],  # drop minus sign
+    range=[0, y_start],  # reversed: 0 at top, most negative at bottom
     autorange=False,
     zeroline=True,
     zerolinecolor="#bbb",
@@ -238,8 +242,12 @@ fig.update_yaxes(
     ticks="outside",
 )
 
+# Important: Do NOT call any further fig.update_yaxes/fig.update_xaxes after this point.
+
 fig.update_layout(height=650, margin=dict(l=40, r=20, t=30, b=40))
 st.plotly_chart(fig, use_container_width=True)
+
+
 
 with st.expander("Show data"):
     st.dataframe(
