@@ -2,29 +2,27 @@
 import json
 import math
 import re
-from datetime import timedelta
+from html.parser import HTMLParser
 
 import pandas as pd
 import plotly.graph_objects as go
 import requests
 import streamlit as st
-from bs4 import BeautifulSoup
 
 st.set_page_config(page_title="Race Gaps vs Leader", layout="wide")
 st.title("Race Gaps vs Leader")
 
 RTRT_URL = "https://app.rtrt.me/IRM-WORLDCHAMPIONSHIP-MEN-2024/leaderboard/pro-men-ironman/"
 
-# --------------------------
-# Helpers
-# --------------------------
+# ======================================
+# Utilities
+# ======================================
 def parse_hms_to_timedelta(s: str) -> pd.Timedelta | None:
     if s is None:
         return None
     s = s.strip()
     if not s:
         return None
-    # Accept H:MM:SS, MM:SS, or seconds
     parts = s.split(":")
     try:
         if len(parts) == 3:
@@ -80,88 +78,100 @@ def split_range(splits, start_key, end_key):
     else:
         return splits[i1:i0+1]
 
-# --------------------------
-# Robust RTRT extraction
-# --------------------------
-@st.cache_data(show_spinner=True, ttl=300)
-def fetch_rtrt_html(url: str) -> str:
-    headers = {"User-Agent": "Mozilla/5.0 (compatible; BearlyFocus/1.0)"}
-    r = requests.get(url, headers=headers, timeout=30)
-    r.raise_for_status()
-    return r.text
+# ======================================
+# Lightweight HTML extraction (no bs4)
+# ======================================
+class SimpleTableParser(HTMLParser):
+    # Collect text content cell-by-cell in order; we’ll rebuild logical rows later
+    def __init__(self):
+        super().__init__()
+        self.in_tr = False
+        self.in_td = False
+        self.curr_row = []
+        self.rows = []
+        self._buf = []
 
-def try_parse_embedded_json(soup: BeautifulSoup) -> pd.DataFrame | None:
-    # Look for obvious JSON structures in script tags
-    # Heuristic: find the largest JSON-like blob with keys that could include athletes/splits/times
-    scripts = soup.find_all("script")
-    best = None
-    best_len = 0
-    for sc in scripts:
-        txt = sc.string or sc.get_text()
-        if not txt:
-            continue
-        # crude JSON object detection
-        if "{" in txt and "}" in txt and any(k in txt for k in ["athlete", "name", "split", "time", "elapsed", "leaderboard"]):
-            # Try to extract the biggest {...} block
-            m = re.search(r"\{.*\}", txt, flags=re.DOTALL)
-            if m:
-                blob = m.group(0)
-                if len(blob) > best_len:
-                    best = blob
-                    best_len = len(blob)
-    if not best:
+    def handle_starttag(self, tag, attrs):
+        if tag == "tr":
+            self.in_tr = True
+            self.curr_row = []
+        elif tag in ("td", "th"):
+            self.in_td = True
+            self._buf = []
+
+    def handle_endtag(self, tag):
+        if tag in ("td", "th"):
+            if self.in_td:
+                text = "".join(self._buf).strip()
+                self.curr_row.append(re.sub(r"\s+", " ", text))
+                self._buf = []
+                self.in_td = False
+        elif tag == "tr":
+            if self.in_tr:
+                # Only keep non-empty rows with some useful content
+                if any(cell for cell in self.curr_row):
+                    self.rows.append(self.curr_row)
+                self.curr_row = []
+                self.in_tr = False
+
+    def handle_data(self, data):
+        if self.in_td:
+            self._buf.append(data)
+
+def extract_embedded_json_blobs(html: str) -> list[str]:
+    # Capture candidate JSON-like blobs inside <script> tags
+    # Heuristic: largest {...} blocks that contain time-ish keys
+    blobs = []
+    for m in re.finditer(r"<script[^>]*>(.*?)</script>", html, flags=re.DOTALL | re.IGNORECASE):
+        script = m.group(1) or ""
+        if any(k in script for k in ["leaderboard", "athlete", "split", "elapsed", "time"]):
+            # try to find JSON object(s)
+            for obj in re.finditer(r"\{[\s\S]*?\}", script):
+                text = obj.group(0)
+                if any(k in text for k in ["name", "split", "elapsed", "time"]):
+                    blobs.append(text)
+    # Sort by length descending to try richer blobs first
+    blobs.sort(key=len, reverse=True)
+    return blobs
+
+def parse_embedded_json_to_df(html: str) -> pd.DataFrame | None:
+    blobs = extract_embedded_json_blobs(html)
+    if not blobs:
         return None
 
-    # Try to load as JSON (tolerate trailing commas)
-    try:
-        data = json.loads(best)
-    except Exception:
-        # Attempt lax cleaning
-        cleaned = re.sub(r",\s*}", "}", best)
-        cleaned = re.sub(r",\s*]", "]", cleaned)
-        try:
-            data = json.loads(cleaned)
-        except Exception:
-            return None
-
-    # Navigate to athlete timing if possible (structure is unknown; search recursively)
     rows = []
-
-    def walk(node, name_ctx=None, splits_ctx=None):
-        nonlocal rows
+    def walk(node, name_ctx=None):
         if isinstance(node, dict):
-            # capture name
-            if name_ctx is None and "name" in node and isinstance(node["name"], str):
+            if "name" in node and isinstance(node["name"], str):
                 name_ctx = node["name"]
-            # capture time-like values paired with split-like keys
-            # if we see lists of splits/times, collect them
-            if "splits" in node and isinstance(node["splits"], list):
-                splits_ctx = node["splits"]
-            # direct fields with time
-            if "elapsed" in node and isinstance(node["elapsed"], (str, int, float)):
-                td = parse_hms_to_timedelta(str(node["elapsed"]))
-                if td is not None:
-                    # split label if present
-                    sp = node.get("split") or node.get("label") or None
-                    if sp is None and splits_ctx and isinstance(splits_ctx, list):
-                        sp = splits_ctx[0] if splits_ctx else None
-                    rows.append({"name": name_ctx or "Unknown", "split": sp or None, "net_td": td})
-
-            for k, v in node.items():
-                walk(v, name_ctx=name_ctx, splits_ctx=splits_ctx)
+            # elapsed in various fields
+            for key in ("elapsed", "time", "net", "total"):
+                if key in node and isinstance(node[key], (str, int, float)):
+                    td = parse_hms_to_timedelta(str(node[key]))
+                    if td is not None:
+                        sp = node.get("split") or node.get("label") or None
+                        rows.append({"name": name_ctx or "Unknown", "split": sp, "net_td": td})
+            for v in node.values():
+                walk(v, name_ctx=name_ctx)
         elif isinstance(node, list):
             for v in node:
-                walk(v, name_ctx=name_ctx, splits_ctx=splits_ctx)
+                walk(v, name_ctx=name_ctx)
 
-    walk(data)
+    for blob in blobs[:6]:  # try a few biggest blobs
+        try_text = re.sub(r",\s*}", "}", blob)
+        try_text = re.sub(r",\s*]", "]", try_text)
+        try:
+            data = json.loads(try_text)
+        except Exception:
+            continue
+        walk(data)
 
     if not rows:
         return None
 
     df = pd.DataFrame(rows).dropna(subset=["net_td"])
-    # If many rows are missing split names, we’ll order generically
+    # If splits are missing, we’ll assign generic sequence per athlete
     if "split" not in df.columns or df["split"].isna().all():
-        # generate per-athlete sequence S1, S2, ...
         out = []
         for nm, g in df.groupby("name"):
             g = g.sort_values("net_td")
@@ -175,57 +185,50 @@ def try_parse_embedded_json(soup: BeautifulSoup) -> pd.DataFrame | None:
         df2["split"] = pd.Categorical(df2["split"], categories=order, ordered=True)
         return df2.sort_values(["split", "name"]).reset_index(drop=True)
 
-    # Otherwise, make sure a START exists per athlete
+    # Ensure START exists per athlete
     out = []
     for nm, g in df.groupby("name"):
         g = g.sort_values("net_td")
-        # ensure a START
-        g2 = pd.concat([
-            pd.DataFrame([{"name": nm, "split": "START", "net_td": pd.to_timedelta(0, unit="s")}]),
-            g[["name", "split", "net_td"]]
-        ], ignore_index=True)
-        out.append(g2)
+        out.append(pd.DataFrame([{"name": nm, "split": "START", "net_td": pd.to_timedelta(0, unit="s")}]))
+        out.append(g[["name", "split", "net_td"]])
     df2 = pd.concat(out, ignore_index=True)
     order = df2.groupby("split")["net_td"].min().sort_values().index.tolist()
     df2["split"] = pd.Categorical(df2["split"], categories=order, ordered=True)
     return df2.sort_values(["split", "name"]).reset_index(drop=True)
 
-def fallback_parse_table(soup: BeautifulSoup) -> pd.DataFrame:
-    # Fallback: extract per-row sequential time-like strings and build generic splits
-    rows = []
-    for tr in soup.select("tr"):
-        tds = tr.find_all(["td", "th"])
-        if len(tds) < 3:
-            continue
-        # probable name
+def fallback_parse_table_to_df(html: str) -> pd.DataFrame:
+    parser = SimpleTableParser()
+    parser.feed(html)
+    table_rows = [r for r in parser.rows if len(r) >= 3]
+
+    people = []
+    time_re = re.compile(r"\b\d{1,2}:\d{2}(:\d{2})?\b")
+    for row in table_rows:
+        # guess a name cell (2+ words, not just times)
         name = None
-        for td in tds:
-            t = td.get_text(" ", strip=True)
-            if t and len(t.split()) >= 2 and not re.search(r"\d{1,2}:\d{2}(:\d{2})?", t):
-                name = t
+        for cell in row:
+            if time_re.search(cell):
+                continue
+            if len(cell.split()) >= 2:
+                name = cell
                 break
         if not name:
             continue
-        # collect times
-        times = []
-        for td in tds:
-            t = td.get_text(" ", strip=True)
-            if re.search(r"\b\d{1,2}:\d{2}(:\d{2})?\b", t):
-                times.append(t)
+        times = [c for c in row if time_re.search(c)]
         if times:
-            rows.append({"name": name, "times": times})
+            people.append((name, times))
 
-    if not rows:
-        raise RuntimeError("Unable to parse RTRT table structure.")
+    if not people:
+        raise RuntimeError("Could not parse any athlete rows from table.")
 
     out = []
-    for row in rows:
-        nm = row["name"]
+    for nm, times in people:
         out.append({"name": nm, "split": "START", "net_td": pd.to_timedelta(0, unit="s")})
-        for i, ts in enumerate(row["times"], start=1):
+        for i, ts in enumerate(times, start=1):
             td = parse_hms_to_timedelta(ts)
             if td is not None:
                 out.append({"name": nm, "split": f"S{i}", "net_td": td})
+
     df = pd.DataFrame(out)
     order = df.groupby("split")["net_td"].min().sort_values().index.tolist()
     df["split"] = pd.Categorical(df["split"], categories=order, ordered=True)
@@ -233,27 +236,32 @@ def fallback_parse_table(soup: BeautifulSoup) -> pd.DataFrame:
 
 @st.cache_data(show_spinner=True, ttl=300)
 def load_rtrt_df(url: str) -> pd.DataFrame:
-    html = fetch_rtrt_html(url)
-    soup = BeautifulSoup(html, "html.parser")
-    df = try_parse_embedded_json(soup)
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; BearlyFocus/1.0)"}
+    r = requests.get(url, headers=headers, timeout=30)
+    r.raise_for_status()
+    html = r.text
+
+    # Try embedded JSON first (more structured)
+    df = parse_embedded_json_to_df(html)
     if df is not None and not df.empty:
         return df
-    # fallback
-    return fallback_parse_table(soup)
 
-# --------------------------
+    # Fallback to table-only parse
+    return fallback_parse_table_to_df(html)
+
+# ======================================
 # Load data
-# --------------------------
+# ======================================
 try:
     df = load_rtrt_df(RTRT_URL)
-    st.caption("Data source: RTRT leaderboard (live parsed).")
+    st.caption("Data source: RTRT leaderboard (live parsed, no bs4).")
 except Exception as e:
     st.error(f"Failed to fetch/parse RTRT data. Details: {e}")
     st.stop()
 
-# --------------------------
-# UI
-# --------------------------
+# ======================================
+# UI controls
+# ======================================
 with st.expander("Test mode", expanded=True):
     test_mode = st.checkbox("Enable test mode (limit dataset to athlete elapsed < Max hours)", value=False)
     max_hours = st.slider("Max hours", 1.0, 12.0, 7.0, 0.5)
@@ -285,9 +293,9 @@ if df.empty or len(selected) == 0 or len(splits_ordered) == 0:
 
 range_splits = split_range(splits_ordered, from_split, to_split)
 
-# --------------------------
+# ======================================
 # Snapshot table (Top 10)
-# --------------------------
+# ======================================
 leaders_now = compute_leaders(df)
 df_now = df.merge(leaders_now, on="split", how="left").dropna(subset=["net_td", "leader_td"])
 
@@ -312,9 +320,9 @@ else:
     top10["Behind (min)"] = top10["Behind (min)"].map(lambda x: f"{x:.1f}")
     st.dataframe(top10.head(10).reset_index(drop=True), use_container_width=True, height=320)
 
-# --------------------------
+# ======================================
 # Plot prep
-# --------------------------
+# ======================================
 sel = df[df["name"].isin(selected) & df["split"].isin(range_splits)].copy()
 xy_df = sel.merge(leaders_now, on="split", how="left").dropna(subset=["net_td", "leader_td"])
 xy_df["leader_hr"] = xy_df["leader_td"].dt.total_seconds() / 3600.0
@@ -337,9 +345,9 @@ if xy_df.empty:
     st.info("No rows to plot for the current selection.")
     st.stop()
 
-# --------------------------
+# ======================================
 # Plot
-# --------------------------
+# ======================================
 fig = go.Figure()
 for nm, g in xy_df.groupby("name", sort=False):
     g = g.sort_values("leader_hr")
@@ -384,7 +392,7 @@ leaders_in_xy = xy_df.groupby("split", as_index=False)["leader_hr"].max()
 x_max_leader = float(leaders_in_xy["leader_hr"].max()) if not leaders_in_xy.empty else float(xy_df["leader_hr"].max())
 x_right_raw = x_max_leader + 0.5
 x_left = math.floor(x_min_data / 0.5) * 0.5
-x_right = min(x_right_raw, float(st.session_state.get("max_hours_val", 12.0))) if (test_mode and "max_hours_val" in st.session_state) else (min(x_right_raw, float(max_hours)) if test_mode else x_right_raw)
+x_right = min(x_right_raw, float(max_hours)) if test_mode else x_right_raw
 
 x_ticks_all = hour_ticks(x_left, x_right, step=0.5)
 
