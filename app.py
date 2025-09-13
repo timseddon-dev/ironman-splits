@@ -21,16 +21,17 @@ def load_data(path: str) -> pd.DataFrame:
 
     df = pd.read_csv(path)
 
-    # Normalize
+    # Normalize text columns
     if "name" in df.columns:
         df["name"] = df["name"].astype(str).str.strip()
     if "split" in df.columns:
         df["split"] = df["split"].astype(str).str.strip().str.upper()
 
+    # Convert km
     if "km" in df.columns:
         df["km"] = pd.to_numeric(df["km"], errors="coerce")
 
-    # Ensure net_td (elapsed)
+    # Ensure net_td present (derive if needed)
     def _parse_td(x):
         if pd.isna(x):
             return pd.NaT
@@ -64,6 +65,7 @@ def load_data(path: str) -> pd.DataFrame:
     else:
         df["net_td"] = pd.NaT
 
+    # Drop rows missing essentials
     if "name" in df.columns and "split" in df.columns:
         df = df.dropna(subset=["name", "split"]).copy()
 
@@ -145,7 +147,7 @@ def hour_ticks(lo_h: float, hi_h: float, step: float = 0.5) -> list:
     return vals
 
 
-# Load
+# Load data
 df = load_data(DATA_FILE)
 if not isinstance(df, pd.DataFrame) or df.empty:
     st.warning("No data loaded from long.csv.")
@@ -161,7 +163,7 @@ if "km" in df.columns:
           .to_dict()
     )
 
-# Initial order
+# Initial order for splits
 splits_ordered_master = available_splits_in_order(df)
 try:
     df["split"] = pd.Categorical(df["split"], categories=splits_ordered_master, ordered=True)
@@ -170,12 +172,13 @@ except Exception:
 
 
 # ======================================
-# 2) UI and options (Test mode, split range)
+# 2) UI: Test mode and Split selectors
 # ======================================
 with st.expander("Test mode", expanded=True):
     test_mode = st.checkbox("Enable test mode (limit dataset by athlete elapsed < Max hours)", value=False)
     max_hours = st.slider("Max hours", 1.0, 12.0, 5.5, 0.5)
 
+# Apply test filter BEFORE any “latest split” computation
 if test_mode:
     if "net_td" not in df.columns:
         st.error("Test filter requires 'net_td'.")
@@ -183,7 +186,7 @@ if test_mode:
     max_td = pd.to_timedelta(max_hours, unit="h")
     before_rows = len(df)
     d = df.dropna(subset=["net_td"]).copy()
-    df = d[d["net_td"] < max_td].copy()  # filter BEFORE computing latest split
+    df = d[d["net_td"] < max_td].copy()
     after_rows = len(df)
     st.caption(f"Test mode active: {after_rows:,} rows (from {before_rows:,}) with athlete elapsed < {max_hours:.1f} h")
 
@@ -194,7 +197,7 @@ try:
 except Exception:
     pass
 
-# Split range selectors (From = START)
+# Split range selectors (From defaults to START)
 colA, colB = st.columns([1, 1])
 with colA:
     from_idx = splits_ordered_master.index("START") if "START" in splits_ordered_master else 0
@@ -213,8 +216,7 @@ def split_range(splits, start_key, end_key):
 
 
 # ======================================
-# 3) Leaderboard (full list, narrow columns, sticky header, forced vertical scroll)
-#    Leader always selected. Latest split shows distance and reflects test filter.
+# 3) Leaderboard — narrow columns, sticky header, forced vertical scroll
 # ======================================
 leaders_now = compute_leaders(df)
 df_now = df.merge(leaders_now, on="split", how="left").dropna(subset=["net_td", "leader_td"])
@@ -225,6 +227,7 @@ if df_now.empty:
     st.info("No data available for the current dataset.")
     selected_for_plot = []
 else:
+    # Latest per athlete (reflects applied test filter)
     latest_now = (
         df_now.sort_values(["name", "net_td"])
               .groupby("name", as_index=False)
@@ -242,7 +245,7 @@ else:
         columns={"rank": "#", "name": "Athlete"}
     )
 
-    # Initialize checkbox state (top 10 + always leader)
+    # Initialize checkbox state: top 10 selected; leader always on
     if "plot_checks" not in st.session_state:
         st.session_state.plot_checks = {}
         top10 = set(table_df.head(10)["Athlete"].tolist())
@@ -252,27 +255,28 @@ else:
     leader_name = table_df.iloc[0]["Athlete"]
     st.session_state.plot_checks[leader_name] = True
 
-    # CSS: narrower columns and always-visible vertical scrollbar
+    # CSS to narrow columns and force vertical scrollbar
     st.markdown(
         """
         <style>
-        .lb-wrapper { max-height: 420px; overflow-y: scroll; padding-right: 8px; }
+        .lb-wrapper { max-height: 320px; overflow-y: scroll; padding-right: 10px; }
         .lb-wrapper::-webkit-scrollbar { width: 10px; }
-        .lb-wrapper::-webkit-scrollbar-thumb { background: rgba(0,0,0,0.2); border-radius: 6px; }
+        .lb-wrapper::-webkit-scrollbar-thumb { background: rgba(0,0,0,0.18); border-radius: 6px; }
         .lb-row { padding: 6px 0; border-bottom: 1px solid rgba(0,0,0,0.06); }
         .lb-header { position: sticky; top: 0; background: white; z-index: 2;
                      border-bottom: 1px solid rgba(0,0,0,0.2); padding: 6px 0; }
-        .lb-col-athlete { width: 18ch; }
-        .lb-col-split   { width: 12ch; }
-        .lb-col-gap     { width: 7ch; text-align: right; }
-        .lb-col-plot    { width: 8ch; text-align: right; }
+        .lb-col-athlete { width: 16ch; }
+        .lb-col-split   { width: 14ch; }
+        .lb-col-gap     { width: 6ch; text-align: right; }
+        .lb-col-plot    { width: 6ch; text-align: right; }
         </style>
         """,
         unsafe_allow_html=True,
     )
 
+    # Header
     st.markdown('<div class="lb-header">', unsafe_allow_html=True)
-    header_cols = st.columns([2.4, 1.6, 1.0, 0.8])
+    header_cols = st.columns([2.0, 1.7, 1.0, 0.8])
     with header_cols[0]:
         st.markdown('<div class="lb-col-athlete"><strong>Athlete</strong></div>', unsafe_allow_html=True)
     with header_cols[1]:
@@ -280,9 +284,10 @@ else:
     with header_cols[2]:
         st.markdown('<div class="lb-col-gap"><strong>Behind (min)</strong></div>', unsafe_allow_html=True)
     with header_cols[3]:
-        st.markdown('<div class="lb-col-plot"><strong>Plot on chart</strong></div>', unsafe_allow_html=True)
+        st.markdown('<div class="lb-col-plot"><strong>Plot</strong></div>', unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
+    # Body
     st.markdown('<div class="lb-wrapper">', unsafe_allow_html=True)
     for _, row in table_df.iterrows():
         athlete = row["Athlete"]
@@ -290,7 +295,7 @@ else:
         behind = row["Behind (min)"]
 
         st.markdown('<div class="lb-row">', unsafe_allow_html=True)
-        row_cols = st.columns([2.4, 1.6, 1.0, 0.8])
+        row_cols = st.columns([2.0, 1.7, 1.0, 0.8])
         with row_cols[0]:
             st.markdown(f'<div class="lb-col-athlete">{athlete}</div>', unsafe_allow_html=True)
         with row_cols[1]:
@@ -308,6 +313,7 @@ else:
         st.markdown('</div>', unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
+    # Bulk actions
     c1, c2, c3 = st.columns(3)
     with c1:
         if st.button("Select top 10"):
@@ -327,7 +333,7 @@ else:
 
 
 # ======================================
-# 4) Plot: 0 at top, y increases downward (negative values), labels at last point
+# 4) Plot: 0 at top, downward y, labels at last point, split labels include distances
 # ======================================
 master_order = available_splits_in_order(df)
 range_splits = split_range(master_order, from_split, to_split)
@@ -344,7 +350,7 @@ leaders_now = compute_leaders(df)
 xy_df = sel.merge(leaders_now, on="split", how="left").dropna(subset=["net_td", "leader_td"])
 xy_df["leader_hr"] = xy_df["leader_td"].dt.total_seconds() / 3600.0
 
-# Negative minutes so 0 is at the top; hover shows positive
+# Negative minutes so 0 is at the top; hover shows positive minutes
 xy_df["y_gap_min"] = -((xy_df["net_td"] - xy_df["leader_td"]).dt.total_seconds() / 60.0)
 xy_df["y_gap_min"] = xy_df["y_gap_min"].clip(upper=0)
 
@@ -360,13 +366,13 @@ if not xy_df.empty:
     })
     xy_df = pd.concat([start_rows, xy_df], ignore_index=True, sort=False)
 
-# Split labels include distances
+# Split labels with distances
 xy_df["split_label"] = xy_df["split"].astype(str).map(lambda s: friendly_split_label(s, km_lookup))
 xy_df = xy_df.sort_values(["name", "leader_hr"], kind="mergesort")
 
 fig = go.Figure()
 
-# Lines
+# Draw lines
 for nm, g in xy_df.groupby("name", sort=False):
     g = g.sort_values("leader_hr")
     fig.add_trace(go.Scatter(
@@ -379,10 +385,10 @@ for nm, g in xy_df.groupby("name", sort=False):
         hovertemplate="Athlete: %{text}<br>Split: %{meta}<br>Leader elapsed: %{x:.2f} h<br>Behind: %{customdata:.1f} min",
         text=[nm]*len(g),
         meta=g["split_label"],
-        customdata=[-v for v in g["y_gap_min"]],  # show positive mins in hover
+        customdata=[-v for v in g["y_gap_min"]],
     ))
 
-# Labels at last point
+# Labels at the last point of each series
 endpoints = (
     xy_df.sort_values(["name", "leader_hr"])
          .groupby("name", as_index=False)
@@ -406,7 +412,7 @@ for _, row in endpoints.iterrows():
         opacity=0.95,
     ))
 
-# Axes: x ticks 30 min, y ticks every 1 min downwards
+# Axes setup
 x_min_data = float(xy_df["leader_hr"].min())
 leaders_in_xy = xy_df.groupby("split", as_index=False)["leader_hr"].max()
 x_max_leader = float(leaders_in_xy["leader_hr"].max()) if not leaders_in_xy.empty else float(xy_df["leader_hr"].max())
@@ -416,7 +422,7 @@ x_right = min(x_right_raw, float(max_hours)) if test_mode else x_right_raw
 x_ticks_all = hour_ticks(x_left, x_right, step=0.5)
 
 y_min_val = float(xy_df["y_gap_min"].min())  # negative or 0
-y_span = max(2, int(abs(y_min_val)))
+y_span = max(1, int(abs(y_min_val)))
 y_ticks = [0] + [-(i) for i in range(1, y_span + 1)]
 y_ticktext = ["0"] + [str(i) for i in range(1, y_span + 1)]
 
@@ -430,22 +436,20 @@ fig.update_xaxes(
     showline=True,
     mirror=True,
     ticks="outside",
-    anchor="y",
 )
 
 fig.update_yaxes(
     title="Time behind leader (min)",
     tickmode="array",
     tickvals=y_ticks,
-    ticktext=y_ticktext,           # show positive labels
-    range=[0.5, y_min_val - 1],    # 0 at top; negative extends downward
+    ticktext=y_ticktext,        # show positive values
+    range=[0.5, y_min_val - 1], # 0 at top; negative extends downward
     showgrid=True,
     zeroline=True,
     zerolinecolor="rgba(0,0,0,0.25)",
     showline=True,
     mirror=True,
     ticks="outside",
-    anchor="x",
 )
 
 fig.update_layout(
