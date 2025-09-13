@@ -139,9 +139,21 @@ def friendly_split_label(split: str, km_lookup: dict | None = None) -> str:
     return s
 
 def fmt_hmm(hours_float: float) -> str:
+    # Format float hours as H:MM
     total_minutes = int(round(hours_float * 60))
     hh = total_minutes // 60
-    mm = total_minutes %
+    mm = total_minutes % 60
+    return f"{hh}:{mm:02d}"
+
+def hour_ticks(lo_h: float, hi_h: float, step: float = 0.5) -> list:
+    import math as _math
+    start = _math.floor(lo_h / step) * step
+    end = _math.ceil(hi_h / step) * step
+    vals, v = [], start
+    while v <= end + 1e-9:
+        vals.append(round(v, 6))
+        v += step
+    return vals
 
 # ======================================
 # 2) UI and options (Test mode, positions, athlete selection, range)
