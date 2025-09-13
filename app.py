@@ -168,22 +168,23 @@ range_splits = splits_order[i0:i1+1]
 # ======================================
 # 2.5) Summary Table (Top 10 at ≤ 7h)
 # ======================================
-# We'll derive the snapshot from the same ≤ 7h state as the plot.
-
-# 1) Build a ≤ 7h subset with leader times joined (like in plotting)
+# Build ≤ 7h subset with leader times joined
 leaders_full = compute_leaders(df)
 df_7h = (
     df.merge(leaders_full[["split", "leader_td"]], on="split", how="left")
       .dropna(subset=["net_td", "leader_td"])
       .assign(leader_hr=lambda d: d["leader_td"].dt.total_seconds() / 3600.0)
 )
+
+# Restrict to ≤ 7h
 df_7h = df_7h[df_7h["leader_hr"] <= 7.0].copy()
 
+st.subheader("Race snapshot (Top 10 at ≤ 7h)")
+
 if df_7h.empty:
-    st.subheader("Race snapshot (Top 10 at ≤ 7h)")
     st.info("No data available within the first 7 hours yet.")
 else:
-    # 2) For each athlete, take their latest available row within ≤ 7h
+    # Latest available row per athlete within ≤ 7h
     latest_7h = (
         df_7h.sort_values(["name", "leader_td"])
              .groupby("name", as_index=False)
@@ -191,24 +192,22 @@ else:
              .reset_index(drop=True)
     )
 
-    # 3) Compute time behind the leader at that split (non-negative display)
+    # Compute gap to leader (minutes, non-negative for display)
     latest_7h["gap_min"] = (latest_7h["net_td"] - latest_7h["leader_td"]).dt.total_seconds() / 60.0
     latest_7h["gap_min"] = latest_7h["gap_min"].clip(lower=0)
 
-    # 4) Order primarily by advancement (larger leader_td means later in race), then by smallest gap
+    # Order primarily by how far into the race they are (leader_td), then smallest gap
     snapshot = latest_7h.sort_values(["leader_td", "gap_min"], ascending=[False, True])
 
-    # 5) Keep essentials and format
     top10 = (
         snapshot[["name", "split", "gap_min"]]
         .rename(columns={"name": "Athlete", "split": "Latest split", "gap_min": "Behind (min)"})
-        .head(10)
         .copy()
     )
-    top10["Behind (min)"] = top10["Behind (min)"].map(lambda x: f"{x:.1f}")
 
-    st.subheader("Race snapshot (Top 10 at ≤ 7h)")
-    st.dataframe(top10.reset_index(drop=True), use_container_width=True, height=320)
+    # Format gap and show only the top 10
+    top10["Behind (min)"] = top10["Behind (min)"].map(lambda x: f"{x:.1f}")
+    st.dataframe(top10.head(10).reset_index(drop=True), use_container_width=True, height=320)
 
 # ======================================
 # 3) Data Prep For Plot
