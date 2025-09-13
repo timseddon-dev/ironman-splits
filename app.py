@@ -151,7 +151,7 @@ if not isinstance(df, pd.DataFrame) or df.empty:
     st.warning("No data loaded from long.csv.")
     st.stop()
 
-# km lookup from long.csv (already produced upstream)
+# km lookup
 km_lookup = None
 if "km" in df.columns:
     km_lookup = (
@@ -161,6 +161,7 @@ if "km" in df.columns:
           .to_dict()
     )
 
+# Initial order
 splits_ordered_master = available_splits_in_order(df)
 try:
     df["split"] = pd.Categorical(df["split"], categories=splits_ordered_master, ordered=True)
@@ -182,7 +183,7 @@ if test_mode:
     max_td = pd.to_timedelta(max_hours, unit="h")
     before_rows = len(df)
     d = df.dropna(subset=["net_td"]).copy()
-    df = d[d["net_td"] < max_td].copy()
+    df = d[d["net_td"] < max_td].copy()  # filter BEFORE computing latest split
     after_rows = len(df)
     st.caption(f"Test mode active: {after_rows:,} rows (from {before_rows:,}) with athlete elapsed < {max_hours:.1f} h")
 
@@ -212,7 +213,8 @@ def split_range(splits, start_key, end_key):
 
 
 # ======================================
-# 3) Leaderboard (full list, scrollable, narrower; leader always selected)
+# 3) Leaderboard (full list, narrow columns, sticky header, forced vertical scroll)
+#    Leader always selected. Latest split shows distance and reflects test filter.
 # ======================================
 leaders_now = compute_leaders(df)
 df_now = df.merge(leaders_now, on="split", how="left").dropna(subset=["net_td", "leader_td"])
@@ -250,16 +252,18 @@ else:
     leader_name = table_df.iloc[0]["Athlete"]
     st.session_state.plot_checks[leader_name] = True
 
-    # Narrower columns, full list with scroll
+    # CSS: narrower columns and always-visible vertical scrollbar
     st.markdown(
         """
         <style>
-        .lb-scroll-area { max-height: 520px; overflow-y: auto; padding-right: 6px; }
-        .lb-row { padding: 2px 0; border-bottom: 1px solid rgba(0,0,0,0.05); }
+        .lb-wrapper { max-height: 420px; overflow-y: scroll; padding-right: 8px; }
+        .lb-wrapper::-webkit-scrollbar { width: 10px; }
+        .lb-wrapper::-webkit-scrollbar-thumb { background: rgba(0,0,0,0.2); border-radius: 6px; }
+        .lb-row { padding: 6px 0; border-bottom: 1px solid rgba(0,0,0,0.06); }
         .lb-header { position: sticky; top: 0; background: white; z-index: 2;
-                     border-bottom: 1px solid rgba(0,0,0,0.2); padding: 4px 0; }
-        .lb-col-athlete { width: 20ch; }
-        .lb-col-split   { width: 14ch; }
+                     border-bottom: 1px solid rgba(0,0,0,0.2); padding: 6px 0; }
+        .lb-col-athlete { width: 18ch; }
+        .lb-col-split   { width: 12ch; }
         .lb-col-gap     { width: 7ch; text-align: right; }
         .lb-col-plot    { width: 8ch; text-align: right; }
         </style>
@@ -268,7 +272,7 @@ else:
     )
 
     st.markdown('<div class="lb-header">', unsafe_allow_html=True)
-    header_cols = st.columns([3.0, 2.0, 1.1, 0.9])
+    header_cols = st.columns([2.4, 1.6, 1.0, 0.8])
     with header_cols[0]:
         st.markdown('<div class="lb-col-athlete"><strong>Athlete</strong></div>', unsafe_allow_html=True)
     with header_cols[1]:
@@ -279,14 +283,14 @@ else:
         st.markdown('<div class="lb-col-plot"><strong>Plot on chart</strong></div>', unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
-    st.markdown('<div class="lb-scroll-area">', unsafe_allow_html=True)
+    st.markdown('<div class="lb-wrapper">', unsafe_allow_html=True)
     for _, row in table_df.iterrows():
         athlete = row["Athlete"]
         latest_split = row["Latest split"]
         behind = row["Behind (min)"]
 
         st.markdown('<div class="lb-row">', unsafe_allow_html=True)
-        row_cols = st.columns([3.0, 2.0, 1.1, 0.9])
+        row_cols = st.columns([2.4, 1.6, 1.0, 0.8])
         with row_cols[0]:
             st.markdown(f'<div class="lb-col-athlete">{athlete}</div>', unsafe_allow_html=True)
         with row_cols[1]:
@@ -323,7 +327,7 @@ else:
 
 
 # ======================================
-# 4) Plot: negative gaps (leader − athlete), y labels positive, labels at last point
+# 4) Plot: 0 at top, y increases downward (negative values), labels at last point
 # ======================================
 master_order = available_splits_in_order(df)
 range_splits = split_range(master_order, from_split, to_split)
@@ -344,7 +348,7 @@ xy_df["leader_hr"] = xy_df["leader_td"].dt.total_seconds() / 3600.0
 xy_df["y_gap_min"] = -((xy_df["net_td"] - xy_df["leader_td"]).dt.total_seconds() / 60.0)
 xy_df["y_gap_min"] = xy_df["y_gap_min"].clip(upper=0)
 
-# START anchors
+# START anchors for continuity
 if not xy_df.empty:
     start_rows = pd.DataFrame({
         "name": list(dict.fromkeys(selected_for_plot)),
@@ -356,11 +360,13 @@ if not xy_df.empty:
     })
     xy_df = pd.concat([start_rows, xy_df], ignore_index=True, sort=False)
 
+# Split labels include distances
 xy_df["split_label"] = xy_df["split"].astype(str).map(lambda s: friendly_split_label(s, km_lookup))
 xy_df = xy_df.sort_values(["name", "leader_hr"], kind="mergesort")
 
 fig = go.Figure()
 
+# Lines
 for nm, g in xy_df.groupby("name", sort=False):
     g = g.sort_values("leader_hr")
     fig.add_trace(go.Scatter(
@@ -373,10 +379,10 @@ for nm, g in xy_df.groupby("name", sort=False):
         hovertemplate="Athlete: %{text}<br>Split: %{meta}<br>Leader elapsed: %{x:.2f} h<br>Behind: %{customdata:.1f} min",
         text=[nm]*len(g),
         meta=g["split_label"],
-        customdata=[-v for v in g["y_gap_min"]],
+        customdata=[-v for v in g["y_gap_min"]],  # show positive mins in hover
     ))
 
-# Final-point labels (no offsets; anchored on last point)
+# Labels at last point
 endpoints = (
     xy_df.sort_values(["name", "leader_hr"])
          .groupby("name", as_index=False)
@@ -400,16 +406,16 @@ for _, row in endpoints.iterrows():
         opacity=0.95,
     ))
 
-# Axes
+# Axes: x ticks 30 min, y ticks every 1 min downwards
 x_min_data = float(xy_df["leader_hr"].min())
 leaders_in_xy = xy_df.groupby("split", as_index=False)["leader_hr"].max()
 x_max_leader = float(leaders_in_xy["leader_hr"].max()) if not leaders_in_xy.empty else float(xy_df["leader_hr"].max())
-x_right_raw = x_max_leader + 0.3
+x_right_raw = x_max_leader + 0.25
 x_left = math.floor(x_min_data / 0.5) * 0.5
 x_right = min(x_right_raw, float(max_hours)) if test_mode else x_right_raw
 x_ticks_all = hour_ticks(x_left, x_right, step=0.5)
 
-y_min_val = float(xy_df["y_gap_min"].min())
+y_min_val = float(xy_df["y_gap_min"].min())  # negative or 0
 y_span = max(2, int(abs(y_min_val)))
 y_ticks = [0] + [-(i) for i in range(1, y_span + 1)]
 y_ticktext = ["0"] + [str(i) for i in range(1, y_span + 1)]
@@ -431,8 +437,8 @@ fig.update_yaxes(
     title="Time behind leader (min)",
     tickmode="array",
     tickvals=y_ticks,
-    ticktext=y_ticktext,
-    range=[0.5, y_min_val - 1],
+    ticktext=y_ticktext,           # show positive labels
+    range=[0.5, y_min_val - 1],    # 0 at top; negative extends downward
     showgrid=True,
     zeroline=True,
     zerolinecolor="rgba(0,0,0,0.25)",
