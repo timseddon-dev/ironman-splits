@@ -200,7 +200,7 @@ if xy_df.empty:
 # ======================================
 # 4) Plot: Lines + End Labels + Reference Lines
 # ======================================
-# Lines only: remove symbols by setting mode="lines" for the main trace
+# Lines only (no symbols)
 fig = px.scatter(
     xy_df,
     x="leader_hr",
@@ -209,11 +209,9 @@ fig = px.scatter(
     hover_data={"name": True, "split": True, "leader_hr": ":.2f", "y_gap_min": ":.2f"},
     labels={"leader_hr": "Leader elapsed (hours)", "y_gap_min": "Time behind leader (minutes)"},
 )
-
-# Convert the default marker traces into lines-only
 fig.update_traces(mode="lines", selector=dict(mode="markers"))
 
-# Ensure we also draw explicit line traces for continuity (optional but keeps behavior consistent)
+# Also add explicit line traces for continuity
 for nm, grp in xy_df.groupby("name"):
     fig.add_scatter(
         x=grp["leader_hr"],
@@ -224,21 +222,24 @@ for nm, grp in xy_df.groupby("name"):
         showlegend=False,
     )
 
-# End-of-series labels to the right using separate text traces
+# Find each athlete's last plotted point
 last_points = (
     xy_df.groupby("name", as_index=False)
          .apply(lambda g: g.sort_values("leader_hr").tail(1))
          .reset_index(drop=True)[["name", "leader_hr", "y_gap_min"]]
 )
 
-# Offset labels to the right; we’ll extend X range accordingly in Section 5
+# Compute horizontal label offset (in hours) with a stronger push so they clear the plot area
 x_span = max(1e-6, float(xy_df["leader_hr"].max() - xy_df["leader_hr"].min()))
-label_dx = max(0.02 * x_span, 0.10)   # push a bit further (~6 minutes min)
+label_dx = max(0.03 * x_span, 0.15)  # ~9 minutes minimum
 
-for _, row in last_points.iterrows():
+# Simple vertical staggering to reduce overlapping labels: alternate small up/down offsets
+stagger = [-0.15, +0.15, -0.25, +0.25, -0.35, +0.35, -0.45, +0.45]
+for i, (_, row) in enumerate(last_points.iterrows()):
+    dy = stagger[i % len(stagger)]
     fig.add_scatter(
         x=[row["leader_hr"] + label_dx],
-        y=[row["y_gap_min"]],
+        y=[row["y_gap_min"] + dy],
         mode="text",
         text=[row["name"]],
         textposition="middle left",
@@ -247,8 +248,7 @@ for _, row in last_points.iterrows():
         hoverinfo="skip",
     )
 
-# Reference lines at fastest SWIM and BIKE times
-# Find fastest leader times for SWIM and BIKE within the selected range
+# Reference lines: vertical dotted lines at fastest SWIM and BIKE leader times, without text
 swim_x = None
 bike_x = None
 if "SWIM" in leaders["split"].values:
@@ -260,27 +260,10 @@ if "BIKE" in leaders["split"].values:
     if pd.notna(bike_td):
         bike_x = bike_td.total_seconds() / 3600.0
 
-# Determine the lowest y (most negative) to draw lines down to
-y_lowest = float(xy_df["y_gap_min"].min())
-
-ref_shapes = []
-ref_annotations = []
-if swim_x is not None:
-    ref_shapes.append(dict(type="line", x0=swim_x, x1=swim_x, y0=0, y1=y_lowest,
-                           line=dict(color="#888", width=1, dash="dot")))
-    ref_annotations.append(dict(x=swim_x, y=y_lowest, xanchor="left", yanchor="bottom",
-                                text="SWIM", showarrow=False, font=dict(color="#666", size=11)))
-if bike_x is not None:
-    ref_shapes.append(dict(type="line", x0=bike_x, x1=bike_x, y0=0, y1=y_lowest,
-                           line=dict(color="#888", width=1, dash="dot")))
-    ref_annotations.append(dict(x=bike_x, y=y_lowest, xanchor="left", yanchor="bottom",
-                                text="BIKE", showarrow=False, font=dict(color="#666", size=11)))
-
-
 # ======================================
 # 5) Axes and Layout
 # ======================================
-# X ticks in hours but display as h:mm. Begin at 0 and extend past labels so names fit.
+# X ticks in hours but display as h:mm. Begin at 0 and extend for labels.
 def hour_ticks(series, step=0.5):
     if series.empty:
         return []
@@ -293,12 +276,12 @@ def hour_ticks(series, step=0.5):
         v += step
     return vals
 
-x_ticks_all = hour_ticks(xy_df["leader_hr"], step=0.5)  # every 30 minutes
+x_ticks_all = hour_ticks(xy_df["leader_hr"], step=0.5)
 
 x_max = float(xy_df["leader_hr"].max())
 x_span = max(1e-6, x_max - float(xy_df["leader_hr"].min()))
-label_dx = max(0.02 * x_span, 0.10)  # must match Section 4
-x_right = x_max + label_dx + 0.10    # extra padding for labels
+label_dx = max(0.03 * x_span, 0.15)  # must match the offset used above
+x_right = x_max + label_dx + 0.15    # extra padding for labels
 
 # Helper to format h:mm
 def fmt_hmm(h):
@@ -312,7 +295,7 @@ fig.update_xaxes(
     tickvals=x_ticks_all,
     ticktext=[fmt_hmm(v) for v in x_ticks_all],
     title="Leader elapsed (h:mm)",
-    range=[0.0, x_right],  # begin X at 0 and extend for labels
+    range=[0.0, x_right],
     zeroline=True,
     zerolinecolor="#bbb",
     showline=True,
@@ -321,7 +304,7 @@ fig.update_xaxes(
     anchor="y",
 )
 
-# Y-axis: display absolute values (no minus sign); orientation unchanged
+# Y-axis: absolute values (no minus sign); orientation unchanged
 y_min_val = float(xy_df["y_gap_min"].min())
 y_max_val = float(xy_df["y_gap_min"].max())
 y_start = math.floor(min(y_min_val, 0))
@@ -339,7 +322,16 @@ fig.update_yaxes(
     zerolinecolor="#bbb",
 )
 
-# Apply reference shapes and annotations; hide legend (labels are on the lines)
+# Add vertical reference lines down to the minimum Y tick (axis floor), no labels
+axis_floor = y_start  # minimum tick value
+ref_shapes = []
+if swim_x is not None:
+    ref_shapes.append(dict(type="line", x0=swim_x, x1=swim_x, y0=0, y1=axis_floor,
+                           line=dict(color="#888", width=1, dash="dot")))
+if bike_x is not None:
+    ref_shapes.append(dict(type="line", x0=bike_x, x1=bike_x, y0=0, y1=axis_floor,
+                           line=dict(color="#888", width=1, dash="dot")))
+
 fig.update_layout(
     xaxis=dict(
         range=[0.0, x_right],
@@ -353,13 +345,13 @@ fig.update_layout(
         zerolinecolor="#bbb",
     ),
     shapes=ref_shapes,
-    annotations=ref_annotations,
     showlegend=False,
     height=650,
-    margin=dict(l=40, r=140, t=30, b=40),  # a little more right space for labels
+    margin=dict(l=40, r=160, t=30, b=40),  # more right margin for labels
 )
 
 st.plotly_chart(fig, use_container_width=True)
+
 
 
 # ======================================
