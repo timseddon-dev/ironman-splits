@@ -225,30 +225,76 @@ else:
     st.dataframe(top10.head(10).reset_index(drop=True), use_container_width=True, height=320)
 
 # ======================================
-# 3) Plot prep
+# 2.5) Summary Table (Top 10 on current dataset)
 # ======================================
-sel = df[df["name"].isin(selected) & df["split"].isin(range_splits)].copy()
-xy_df = sel.merge(leaders_now, on="split", how="left").dropna(subset=["net_td", "leader_td"])
-xy_df["leader_hr"] = xy_df["leader_td"].dt.total_seconds() / 3600.0
-xy_df["y_gap_min"] = (xy_df["leader_td"] - xy_df["net_td"]).dt.total_seconds() / 60.0
 
-include_start = (len(range_splits) > 0 and str(range_splits[0]).upper() == "START")
-if include_start:
-    start_rows = pd.DataFrame({
-        "name": list(dict.fromkeys(selected)),
-        "split": "START",
-        "leader_td": pd.to_timedelta(0, unit="s"),
-        "net_td": pd.to_timedelta(0, unit="s"),
-        "leader_hr": 0.0,
-        "y_gap_min": 0.0,
-    })
-    xy_df = pd.concat([start_rows, xy_df], ignore_index=True, sort=False)
+# Helper to create friendly labels
+def friendly_split_label(split: str) -> str:
+    s = str(split).upper()
+    if s == "FINISH":
+        return "Finish"
+    if s == "SWIM":
+        return "Swim 3.8 km"
+    if s == "T1":
+        return "T1"
+    if s == "T2":
+        return "T2"
+    m = re.match(r"BIKE(\d+)$", s)
+    if m:
+        i = int(m.group(1))
+        segments = 25
+        total_km = 180.0
+        km = total_km * min(max(i, 1), segments) / segments
+        return f"Bike {km:.1f} km"
+    m = re.match(r"RUN(\d+)$", s)
+    if m:
+        i = int(m.group(1))
+        segments = 22
+        total_km = 42.2
+        km = total_km * min(max(i, 1), segments) / segments
+        return f"Run {km:.1f} km"
+    if s == "BIKE":
+        return "Bike"
+    return s
 
-xy_df = xy_df.sort_values(["name", "leader_hr"], kind="mergesort")
-if xy_df.empty:
-    st.info("No rows to plot for the current selection.")
-    st.stop()
+# Compute leaders and latest per athlete
+leaders_now = (
+    df.dropna(subset=["net_td"])
+      .sort_values(["split", "net_td"])
+      .groupby("split", as_index=False)
+      .agg(leader_td=("net_td", "min"))
+)
 
+df_now = df.merge(leaders_now, on="split", how="left").dropna(subset=["net_td", "leader_td"])
+
+st.subheader("Race snapshot (Top 10)")
+if df_now.empty:
+    st.info("No data available for the current dataset.")
+else:
+    latest_now = (
+        df_now.sort_values(["name", "net_td"])
+              .groupby("name", as_index=False)
+              .tail(1)
+              .reset_index(drop=True)
+    )
+    latest_now["gap_min"] = (latest_now["net_td"] - latest_now["leader_td"]).dt.total_seconds() / 60.0
+    latest_now["gap_min"] = latest_now["gap_min"].clip(lower=0)
+
+    snapshot = latest_now.sort_values(["leader_td", "gap_min"], ascending=[False, True])
+
+    top10 = (
+        snapshot[["name", "split", "gap_min"]]
+        .rename(columns={"name": "Athlete", "split": "Latest split", "gap_min": "Behind (min)"})
+        .copy()
+    )
+    # Friendly split labels and formatting
+    top10["Latest split"] = top10["Latest split"].map(friendly_split_label)
+    top10["Behind (min)"] = top10["Behind (min)"].map(lambda x: f"{x:.1f}")
+
+    # Number from 1 to 10
+    top10_out = top10.head(10).reset_index(drop=True)
+    top10_out.index = top10_out.index + 1
+    st.dataframe(top10_out, use_container_width=True, height=320)
 # ======================================
 # 4) Plot
 # ======================================
