@@ -158,18 +158,27 @@ def hour_ticks(lo_h: float, hi_h: float, step: float = 0.5) -> list:
 # ======================================
 # 2) UI and options (Test mode, positions, athlete selection, range)
 # ======================================
+
 with st.expander("Test mode", expanded=True):
     test_mode = st.checkbox("Enable test mode (limit dataset by athlete elapsed < Max hours)", value=False)
     max_hours = st.slider("Max hours", 1.0, 12.0, 5.5, 0.5)
 
-# Apply test-mode filter (per-athlete elapsed)
 if test_mode:
-    max_td = pd.to_timedelta(max_hours, unit="h")
-    before_rows = len(df)
-    df = df.dropna(subset=["net_td"])
-    df = df[df["net_td"] < max_td].copy()
-    st.caption(f"Test mode active: {len(df):,} rows (from {before_rows:,}) with athlete elapsed < {max_hours:.1f}h")
+    # Guard that net_td exists
+    if "net_td" not in df.columns:
+        st.error("Test filter requires a 'net_td' Timedelta column. Check long.csv (needs netTime or net_td).")
+        st.stop()
 
+    max_td = pd.to_timedelta(max_hours, unit="h")
+    # Count rows before filtering
+    before_rows = int(len(df)) if isinstance(df, pd.DataFrame) else 0
+
+    # Keep only rows with valid elapsed and below threshold
+    d = df.dropna(subset=["net_td"])
+    df = d[d["net_td"] < max_td].copy()
+
+    after_rows = len(df)
+    st.caption(f"Test mode active: {after_rows:,} rows (from {before_rows:,}) with athlete elapsed < {max_hours:.1f} h")
 # Recompute split categories after any filtering
 splits_ordered_master = available_splits_in_order(df)
 try:
