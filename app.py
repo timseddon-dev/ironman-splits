@@ -129,34 +129,72 @@ df = df[df["leader_hr"] < 7.0].copy()
 
 # Clean up helper column if later sections recompute it
 df.drop(columns=["leader_hr"], errors="ignore", inplace=True)
+# ======================================
+# 2.1) UI controls
+# ======================================
+with st.expander("Test mode", expanded=True):
+    test_mode = st.checkbox("Limit dataset to athlete elapsed < 7 hours", value=True)
+
+# Your existing UI widgets follow (athlete multiselect, From/To split, etc.)
+# Example:
+# selected = st.multiselect("Athletes (ordered by current position)", all_athletes, default=default_athletes)
+# from_split = st.selectbox("From split", available_from_splits, index=available_from_splits.index("SWIM"))
+# to_split = st.selectbox("To split", available_to_splits, index=available_to_splits.index("FINISH"))
+
 
 # ======================================
-# 2.5) Summary Table (Top 10 on filtered test data)
+# 2.2) Apply test filter (per-athlete) if enabled
 # ======================================
-# Since df is already filtered to < 7h, we just compute the live snapshot from df.
-leaders_now = compute_leaders(df)[["split", "leader_td"]]
+# Preconditions: df is already loaded and has column "net_td" as a pandas Timedelta.
+
+if test_mode:
+    if "net_td" not in df.columns:
+        st.error("Test filter requires a 'net_td' Timedelta column on df. Ensure df is loaded before applying the filter.")
+        st.stop()
+
+    seven_hours = pd.to_timedelta(7, unit="h")
+
+    # Keep only rows where the athlete's elapsed < 7 hours
+    df = df.dropna(subset=["net_td"]).copy()
+    df = df[df["net_td"] < seven_hours].copy()
+
+    st.caption(f"Test mode active: {len(df):,} rows with athlete elapsed < 7h")
+
+
+# ======================================
+# 2.5) Summary Table (Top 10 on current dataset)
+# ======================================
+# Build leader times for the current (possibly filtered) df
+leaders_now = (
+    df.dropna(subset=["net_td"])
+      .sort_values(["split", "net_td"])
+      .groupby("split", as_index=False)
+      .agg(leader_td=("net_td", "min"))
+)
+
 df_now = (
     df.merge(leaders_now, on="split", how="left")
       .dropna(subset=["net_td", "leader_td"])
 )
 
+st.subheader("Race snapshot (Top 10)")
+
 if df_now.empty:
-    st.subheader("Race snapshot (Top 10)")
-    st.info("No data available in the test subset (< 7h).")
+    st.info("No data available for the current dataset.")
 else:
-    # For each athlete, take their latest available row in this filtered data
+    # Take each athlete's latest available row in the current dataset
     latest_now = (
-        df_now.sort_values(["name", "leader_td"])
+        df_now.sort_values(["name", "net_td"])
               .groupby("name", as_index=False)
               .tail(1)
               .reset_index(drop=True)
     )
 
-    # Compute behind leader in minutes (non-negative for display)
+    # Gap to leader at that split (non-negative for display)
     latest_now["gap_min"] = (latest_now["net_td"] - latest_now["leader_td"]).dt.total_seconds() / 60.0
     latest_now["gap_min"] = latest_now["gap_min"].clip(lower=0)
 
-    # Rank by progression (leader_td) then smallest gap
+    # Order by progression (leader_td) then smallest gap
     snapshot = latest_now.sort_values(["leader_td", "gap_min"], ascending=[False, True])
 
     top10 = (
@@ -166,8 +204,8 @@ else:
     )
     top10["Behind (min)"] = top10["Behind (min)"].map(lambda x: f"{x:.1f}")
 
-    st.subheader("Race snapshot (Top 10)")
     st.dataframe(top10.head(10).reset_index(drop=True), use_container_width=True, height=320)
+    
 
 # ======================================
 # 3) Data Prep For Plot
