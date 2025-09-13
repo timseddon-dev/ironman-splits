@@ -221,8 +221,9 @@ def split_range(splits, start_key, end_key):
     return splits[i1:i0 + 1]
 
 
+
 # ======================================
-# 3) Leaderboard with "Plot" checkboxes and pagination
+# 3) Leaderboard (proper order, paginated, scrollable) with "Plot on chart" checkboxes
 # ======================================
 leaders_now = compute_leaders(df)
 df_now = df.merge(leaders_now, on="split", how="left").dropna(subset=["net_td", "leader_td"])
@@ -233,6 +234,7 @@ if df_now.empty:
     st.info("No data available for the current dataset.")
     selected_for_plot = []
 else:
+    # Latest row per athlete, compute gap in minutes
     latest_now = (
         df_now.sort_values(["name", "net_td"])
               .groupby("name", as_index=False)
@@ -241,11 +243,16 @@ else:
     )
     latest_now["gap_min"] = (latest_now["net_td"] - latest_now["leader_td"]).dt.total_seconds() / 60.0
     latest_now["gap_min"] = latest_now["gap_min"].clip(lower=0)
-    latest_now = latest_now.sort_values(["net_td", "gap_min"], ascending=[True, True]).reset_index(drop=True)
+
+    # Sort for a true leaderboard: smallest gap first (leader at top)
+    latest_now = latest_now.sort_values(["gap_min", "net_td"], ascending=[True, True]).reset_index(drop=True)
     latest_now["rank"] = latest_now.index + 1
+
+    # Friendly split labels and formatted gap
     latest_now["Latest split"] = latest_now["split"].map(lambda s: friendly_split_label(s, km_lookup))
     latest_now["Behind (min)"] = latest_now["gap_min"].map(lambda x: f"{x:.1f}")
 
+    # Table dataframe in desired column order; checkbox will be rendered last
     table_df = latest_now[["rank", "name", "Latest split", "Behind (min)"]].rename(
         columns={"rank": "#", "name": "Athlete"}
     )
@@ -254,67 +261,103 @@ else:
     page_size = 15
     total_rows = len(table_df)
     total_pages = max(1, (total_rows + page_size - 1) // page_size)
+
     if "lb_page" not in st.session_state:
         st.session_state.lb_page = 0
 
+    # Pagination controls
     col_prev, col_info, col_next = st.columns([1, 4, 1])
     with col_prev:
-        if st.button("⬅️", disabled=(st.session_state.lb_page == 0)):
+        if st.button("⬅️", key="lb_prev", disabled=(st.session_state.lb_page == 0)):
             st.session_state.lb_page = max(0, st.session_state.lb_page - 1)
     with col_info:
         st.caption(f"Showing rows {(st.session_state.lb_page*page_size)+1}–{min((st.session_state.lb_page+1)*page_size, total_rows)} of {total_rows}")
     with col_next:
-        if st.button("➡️", disabled=(st.session_state.lb_page >= total_pages - 1)):
+        if st.button("➡️", key="lb_next", disabled=(st.session_state.lb_page >= total_pages - 1)):
             st.session_state.lb_page = min(total_pages - 1, st.session_state.lb_page + 1)
 
     start = st.session_state.lb_page * page_size
     end = min(start + page_size, total_rows)
     page_df = table_df.iloc[start:end].reset_index(drop=True)
 
-    # Checkbox state per athlete in session (default top 10 checked)
-if "plot_checks" not in st.session_state:
-    st.session_state.plot_checks = {}
+    # Checkbox state per athlete in session (default top 10 checked by current leaderboard order)
+    if "plot_checks" not in st.session_state:
+        st.session_state.plot_checks = {}
+        top10_names = latest_now.head(10)["Athlete"].tolist() if "Athlete" in table_df.columns else latest_now.head(10)["name"].tolist()
+        for nm in latest_now["Athlete"] if "Athlete" in table_df.columns else latest_now["name"]:
+            st.session_state.plot_checks[nm] = (nm in top10_names)
 
-    # Default to top 10 by current rank
-    top10_names = latest_now.sort_values("rank").head(10)["name"].tolist()
+    # Scrollable container for the visible page
+    # We emulate a scroll area by constraining height.
+    with st.container():
+        st.markdown(
+            """
+            <style>
+            .lb-scroll-area {
+                max-height: 520px;
+                overflow-y: auto;
+                padding-right: 8px;
+                border-left: 0px solid transparent;
+            }
+            .lb-row {
+                padding: 4px 0;
+                border-bottom: 1px solid rgba(0,0,0,0.05);
+            }
+            .lb-header {
+                position: sticky;
+                top: 0;
+                background: white;
+                z-index: 1;
+                border-bottom: 1px solid rgba(0,0,0,0.2);
+                padding-top: 4px;
+                padding-bottom: 4px;
+            }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
 
-    # Initialize every athlete's checkbox (True if in top10_names)
-    for nm in latest_now["name"]:
-        st.session_state.plot_checks[nm] = (nm in top10_names)
+        # Header with desired column order; checkbox header last
+        header_cols = st.columns([3.0, 3.0, 2.0, 1.3])  # Athlete | Latest split | Behind | Plot on chart
+        with header_cols[0]:
+            st.markdown("Athlete")
+        with header_cols[1]:
+            st.markdown("Latest split")
+        with header_cols[2]:
+            st.markdown("Behind (min)")
+        with header_cols[3]:
+            st.markdown("Plot on chart")
 
-    # Header
-    header_cols = st.columns([1.0, 3.0, 3.0, 2.0])  # Plot | Athlete | Latest split | Behind
-    with header_cols[0]:
-        st.markdown("Plot")
-    with header_cols[1]:
-        st.markdown("Athlete")
-    with header_cols[2]:
-        st.markdown("Latest split")
-    with header_cols[3]:
-        st.markdown("Behind (min)")
+        # Rows (scrollable)
+        with st.container():
+            st.markdown('<div class="lb-scroll-area">', unsafe_allow_html=True)
 
-    # Rows
-    for _, row in page_df.iterrows():
-        athlete = row["Athlete"]
-        latest_split = row["Latest split"]
-        behind = row["Behind (min)"]
-        row_cols = st.columns([1.0, 3.0, 3.0, 2.0])
-        with row_cols[0]:
-            st.session_state.plot_checks[athlete] = st.checkbox(
-                "", value=st.session_state.plot_checks.get(athlete, False), key=f"plot_{athlete}"
-            )
-        with row_cols[1]:
-            st.write(athlete)
-        with row_cols[2]:
-            st.write(latest_split)
-        with row_cols[3]:
-            st.write(behind)
+            for _, row in page_df.iterrows():
+                athlete = row["Athlete"]
+                latest_split = row["Latest split"]
+                behind = row["Behind (min)"]
+
+                st.markdown('<div class="lb-row">', unsafe_allow_html=True)
+                row_cols = st.columns([3.0, 3.0, 2.0, 1.3])
+                with row_cols[0]:
+                    st.write(athlete)
+                with row_cols[1]:
+                    st.write(latest_split)
+                with row_cols[2]:
+                    st.write(behind)
+                with row_cols[3]:
+                    st.session_state.plot_checks[athlete] = st.checkbox(
+                        "", value=st.session_state.plot_checks.get(athlete, False), key=f"plot_{athlete}"
+                    )
+                st.markdown('</div>', unsafe_allow_html=True)
+
+            st.markdown('</div>', unsafe_allow_html=True)
 
     # Bulk selection helpers
     c1, c2, c3 = st.columns(3)
     with c1:
         if st.button("Select top 10"):
-            top10_names = latest_now.sort_values("rank").head(10)["name"].tolist()
+            top10_names = latest_now.head(10)["Athlete"].tolist() if "Athlete" in table_df.columns else latest_now.head(10)["name"].tolist()
             for nm in st.session_state.plot_checks:
                 st.session_state.plot_checks[nm] = (nm in top10_names)
     with c2:
@@ -326,8 +369,9 @@ if "plot_checks" not in st.session_state:
             for nm in st.session_state.plot_checks:
                 st.session_state.plot_checks[nm] = True
 
-    # Final selection
+    # Final list for plotting
     selected_for_plot = [nm for nm, on in st.session_state.plot_checks.items() if on]
+
 
 
 # ======================================
