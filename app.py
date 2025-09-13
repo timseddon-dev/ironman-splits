@@ -197,7 +197,7 @@ if xy_df.empty:
     st.stop()
 
 # ======================================
-# 4) Plot: Lines + End Labels + Reference Lines
+# 4) Plot: Lines + End Labels (as annotations) + Reference Lines
 # ======================================
 # Lines only (no symbols)
 fig = px.scatter(
@@ -221,33 +221,35 @@ for nm, grp in xy_df.groupby("name"):
         showlegend=False,
     )
 
-# End-of-series labels: left-aligned with a fixed pixel offset to the right
+# End-of-series labels: draw as annotations (left-aligned, pixel offset to the right)
 last_points = (
     xy_df.groupby("name", as_index=False)
          .apply(lambda g: g.sort_values("leader_hr").tail(1))
          .reset_index(drop=True)[["name", "leader_hr", "y_gap_min"]]
 )
 
-# Left align text and nudge by 6 pixels to the right; add small vertical stagger to reduce overlaps
+# Small vertical staggering (in data units) to reduce overlaps
 stagger = [-0.15, +0.15, -0.25, +0.25, -0.35, +0.35, -0.45, +0.45]
+end_annotations = []
 for i, (_, row) in enumerate(last_points.iterrows()):
     dy = stagger[i % len(stagger)]
-    fig.add_scatter(
-        x=[row["leader_hr"]],
-        y=[row["y_gap_min"] + dy],
-        mode="text",
-        text=[row["name"]],
-        textposition="middle left",
-        textfont=dict(size=12),
-        textfont_color=None,  # keep trace color
-        texttemplate="%{text}",
-        textangle=0,
-        textoffset="6,0",     # 6px to the right, 0px vertical
-        showlegend=False,
-        hoverinfo="skip",
-    )
+    end_annotations.append(dict(
+        x=row["leader_hr"],
+        y=row["y_gap_min"] + dy,
+        xref="x",
+        yref="y",
+        text=row["name"],
+        showarrow=False,
+        xanchor="left",     # left-align the text
+        align="left",
+        xshift=8,           # 8 px to the right
+        yshift=0,
+        font=dict(size=12, color=None),  # None -> Plotly will use default (theme)
+        bgcolor="rgba(255,255,255,0.0)", # transparent
+        bordercolor="rgba(0,0,0,0.0)",
+    ))
 
-# Reference lines: vertical dotted lines at fastest SWIM and BIKE leader times (no labels)
+# Vertical dotted reference lines at fastest SWIM and BIKE (no labels)
 swim_x = None
 bike_x = None
 if "SWIM" in leaders["split"].values:
@@ -259,10 +261,11 @@ if "BIKE" in leaders["split"].values:
     if pd.notna(bike_td):
         bike_x = bike_td.total_seconds() / 3600.0
 
+
 # ======================================
 # 5) Axes and Layout
 # ======================================
-# X ticks in hours but display as h:mm. Begin at 0 and extend slightly for labels.
+# X ticks in hours but display as h:mm. Begin at 0 and extend for labels.
 def hour_ticks(series, step=0.5):
     if series.empty:
         return []
@@ -278,7 +281,7 @@ def hour_ticks(series, step=0.5):
 x_ticks_all = hour_ticks(xy_df["leader_hr"], step=0.5)
 
 x_max = float(xy_df["leader_hr"].max())
-x_right = x_max + 0.20   # ~12 minutes extra space for labels; adjust if needed
+x_right = x_max + 0.20  # ~12 minutes padding for labels
 
 def fmt_hmm(h):
     total_minutes = int(round(h * 60))
@@ -318,7 +321,7 @@ fig.update_yaxes(
     zerolinecolor="#bbb",
 )
 
-# Add vertical reference lines down to the minimum Y tick (axis floor), no labels
+# Reference lines drop to the minimum Y tick (axis floor), no labels
 axis_floor = y_start
 ref_shapes = []
 if swim_x is not None:
@@ -341,6 +344,7 @@ fig.update_layout(
         zerolinecolor="#bbb",
     ),
     shapes=ref_shapes,
+    annotations=end_annotations,  # add our label annotations here
     showlegend=False,
     height=650,
     margin=dict(l=40, r=160, t=30, b=40),
