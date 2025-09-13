@@ -27,8 +27,8 @@ def load_data(path: str) -> pd.DataFrame:
         return pd.DataFrame()
     df = pd.read_csv(path)
 
-    # Keep only known columns if present
-    keep_cols = [c for c in ["name", "split", "netTime", "net_td"] if c in df.columns]
+    # Keep known columns if present (km is optional but supported)
+    keep_cols = [c for c in ["name", "split", "netTime", "net_td", "km"] if c in df.columns]
     df = df[keep_cols].copy()
 
     # Derive net_td if needed
@@ -40,12 +40,12 @@ def load_data(path: str) -> pd.DataFrame:
             return pd.NaT
         s = str(x).strip()
         # Normalize 1:23:45 -> 01:23:45
-        if re.fullmatch(r"\d:\d{2}:\d{2}(\.\d{1,3})?", s):
+        import re as _re
+        if _re.fullmatch(r"\d:\d{2}:\d{2}(\.\d{1,3})?", s):
             s = "0" + s
         try:
             return pd.to_timedelta(s)
         except Exception:
-            # Support MM:SS or seconds
             parts = s.split(":")
             try:
                 if len(parts) == 2:
@@ -60,7 +60,6 @@ def load_data(path: str) -> pd.DataFrame:
     if not has_net_td and has_netTime:
         df["net_td"] = df["netTime"].apply(parse_td)
     elif has_net_td:
-        # Parse net_td values if they are strings
         try:
             df["net_td"] = pd.to_timedelta(df["net_td"])
         except Exception:
@@ -75,14 +74,15 @@ def load_data(path: str) -> pd.DataFrame:
     if "split" in df.columns:
         df["split"] = df["split"].astype(str).str.strip().str.upper()
 
+    # km column to numeric if present
+    if "km" in df.columns:
+        df["km"] = pd.to_numeric(df["km"], errors="coerce")
+
     # Remove rows missing essentials
     df = df.dropna(subset=["name", "split"]).copy()
-
-    # Order splits using an expected tri structure; if not present, fall back to observed order
     return df
 
 def expected_order():
-    # Generic Ironman breakdown
     return (
         ["START", "SWIM", "T1"]
         + [f"BIKE{i}" for i in range(1, 26)] + ["BIKE", "T2"]
@@ -95,7 +95,6 @@ def available_splits_in_order(df: pd.DataFrame):
     present = [s for s in order if s in df["split"].dropna().unique().tolist()]
     if present:
         return present
-    # Fallback to inferred order by earliest leader crossing
     d = df.dropna(subset=["net_td"]).copy()
     if d.empty:
         return sorted(df["split"].dropna().unique().tolist())
@@ -115,59 +114,34 @@ def compute_leaders(df: pd.DataFrame) -> pd.DataFrame:
          .agg(leader_td=("net_td", "min"))
     )
 
-def friendly_split_label(split: str) -> str:
+def friendly_split_label(split: str, km_lookup: dict | None = None) -> str:
     s = str(split).upper()
     if s == "FINISH":
         return "Finish"
     if s == "SWIM":
+        # Prefer km from lookup
+        if km_lookup and s in km_lookup and pd.notna(km_lookup[s]):
+            return f"Swim {km_lookup[s]:.1f} km"
         return "Swim 3.8 km"
-    if s == "T1":
-        return "T1"
-    if s == "T2":
-        return "T2"
-    m = re.match(r"BIKE(\d+)$", s)
-    if m:
-        i = int(m.group(1))
-        segments = 25
-        total_km = 180.0
-        km = total_km * min(max(i, 1), segments) / segments
-        return f"Bike {km:.1f} km"
-    m = re.match(r"RUN(\d+)$", s)
-    if m:
-        i = int(m.group(1))
-        segments = 22
-        total_km = 42.2
-        km = total_km * min(max(i, 1), segments) / segments
-        return f"Run {km:.1f} km"
-    if s == "BIKE":
+    if s in ("T1", "T2"):
+        return s
+    # If we have exact km in the CSV, use it
+    if km_lookup and s in km_lookup and pd.notna(km_lookup[s]):
+        if s.startswith("BIKE"):
+            return f"Bike {km_lookup[s]:.1f} km"
+        if s.startswith("RUN"):
+            return f"Run {km_lookup[s]:.1f} km"
+    # Fallback to generic formatting
+    if s.startswith("BIKE"):
         return "Bike"
+    if s.startswith("RUN"):
+        return "Run"
     return s
 
 def fmt_hmm(hours_float: float) -> str:
     total_minutes = int(round(hours_float * 60))
     hh = total_minutes // 60
-    mm = total_minutes % 60
-    return f"{hh}:{mm:02d}"
-
-def hour_ticks(lo_h: float, hi_h: float, step: float = 0.5) -> list:
-    start = math.floor(lo_h / step) * step
-    end = math.ceil(hi_h / step) * step
-    vals, v = [], start
-    while v <= end + 1e-9:
-        vals.append(round(v, 6))
-        v += step
-    return vals
-
-df = load_data(DATA_FILE)
-if df.empty.any() if isinstance(df, pd.DataFrame) else True:
-    st.stop()
-
-# Ensure split is categorical with a master order
-splits_ordered_master = available_splits_in_order(df)
-try:
-    df["split"] = pd.Categorical(df["split"], categories=splits_ordered_master, ordered=True)
-except Exception:
-    pass
+    mm = total_minutes %
 
 # ======================================
 # 2) UI and options (Test mode, positions, athlete selection, range)
@@ -262,7 +236,7 @@ else:
         .rename(columns={"name": "Athlete", "split": "Latest split", "gap_min": "Behind (min)"})
         .copy()
     )
-    top10["Latest split"] = top10["Latest split"].map(friendly_split_label)
+    top10["Latest split"] = top10["Latest split"].map(lambda s: friendly_split_label(s, km_lookup))
     top10["Behind (min)"] = top10["Behind (min)"].map(lambda x: f"{x:.1f}")
 
     top10_out = top10.head(10).reset_index(drop=True)
