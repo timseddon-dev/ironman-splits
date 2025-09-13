@@ -276,4 +276,156 @@ else:
     for _, row in table_df.iterrows():
         athlete = row["Athlete"]
         latest_split = row["Latest split"]
-        behind = row["Behind (
+        behind = row["Behind (min)"]
+
+        st.markdown('<div class="lb-row">', unsafe_allow_html=True)
+        row_cols = st.columns([1.8, 1.6, 1.0, 0.8])
+        with row_cols[0]:
+            st.markdown(f'<div class="lb-col-athlete">{athlete}</div>', unsafe_allow_html=True)
+        with row_cols[1]:
+            st.markdown(f'<div class="lb-col-split">{latest_split}</div>', unsafe_allow_html=True)
+        with row_cols[2]:
+            st.markdown(f'<div class="lb-col-gap">{behind}</div>', unsafe_allow_html=True)
+        with row_cols[3]:
+            if athlete == leader_name:
+                st.checkbox("", value=True, key=f"plot_{athlete}", disabled=True)
+                st.session_state.plot_checks[athlete] = True
+            else:
+                st.session_state.plot_checks[athlete] = st.checkbox(
+                    "", value=st.session_state.plot_checks.get(athlete, False), key=f"plot_{athlete}"
+                )
+        st.markdown('</div>', unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    # Bulk actions
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        if st.button("Select top 10"):
+            top10 = set(table_df.head(10)["Athlete"].tolist())
+            for nm in st.session_state.plot_checks:
+                st.session_state.plot_checks[nm] = (nm in top10) or (nm == leader_name)
+    with c2:
+        if st.button("Select none"):
+            for nm in st.session_state.plot_checks:
+                st.session_state.plot_checks[nm] = (nm == leader_name)
+    with c3:
+        if st.button("Select all"):
+            for nm in st.session_state.plot_checks:
+                st.session_state.plot_checks[nm] = True
+
+    selected_for_plot = [nm for nm, on in st.session_state.plot_checks.items() if on]
+
+
+# --------------------------------------
+# 4) Plot — 0 at top (downward), labels at last point, split labels with distances
+# --------------------------------------
+range_splits = split_range(splits_ordered_master, from_split, to_split)
+if not range_splits:
+    st.info("No splits available for plotting.")
+    st.stop()
+
+sel = df[(df["name"].isin(selected_for_plot)) & (df["split"].astype(str).isin(range_splits))].copy()
+if sel.empty:
+    st.info("No rows match the current selection and split range.")
+    st.stop()
+
+leaders_now = compute_leaders(df)
+xy_df = sel.merge(leaders_now, on="split", how="left").dropna(subset=["net_td", "leader_td"])
+xy_df["leader_hr"] = xy_df["leader_td"].dt.total_seconds() / 3600.0
+
+# Plot negative minutes so 0 is at the top; hover shows positive minutes
+xy_df["y_gap_min"] = -((xy_df["net_td"] - xy_df["leader_td"]).dt.total_seconds() / 60.0)
+xy_df["y_gap_min"] = xy_df["y_gap_min"].clip(upper=0)
+
+# Labels
+xy_df["split_label"] = xy_df["split"].map(friendly_split_label)
+xy_df = xy_df.sort_values(["name", "leader_hr"], kind="mergesort")
+
+fig = go.Figure()
+
+for nm, g in xy_df.groupby("name", sort=False):
+    g = g.sort_values("leader_hr")
+    fig.add_trace(go.Scatter(
+        x=g["leader_hr"],
+        y=g["y_gap_min"],
+        mode="lines",
+        line=dict(width=1.8),
+        name=nm,
+        showlegend=False,
+        hovertemplate="Athlete: %{text}<br>Split: %{meta}<br>Leader elapsed: %{x:.2f} h<br>Behind: %{customdata:.1f} min",
+        text=[nm]*len(g),
+        meta=g["split_label"],
+        customdata=[-v for v in g["y_gap_min"]],
+    ))
+
+# Labels at last data point
+endpoints = (
+    xy_df.sort_values(["name", "leader_hr"])
+         .groupby("name", as_index=False)
+         .tail(1)
+)
+labels = []
+for _, row in endpoints.iterrows():
+    labels.append(dict(
+        x=float(row["leader_hr"]),
+        y=float(row["y_gap_min"]),
+        xref="x", yref="y",
+        text=str(row["name"]),
+        showarrow=False,
+        xanchor="left",
+        yanchor="middle",
+        align="left",
+        font=dict(size=11, color="rgba(0,0,0,0.9)"),
+        bgcolor="rgba(255,255,255,0.65)",
+        bordercolor="rgba(0,0,0,0.1)",
+        borderwidth=1,
+        opacity=0.95,
+    ))
+
+# Axes
+x_min_data = float(xy_df["leader_hr"].min())
+leaders_in_xy = xy_df.groupby("split", as_index=False)["leader_hr"].max()
+x_max_leader = float(leaders_in_xy["leader_hr"].max()) if not leaders_in_xy.empty else float(xy_df["leader_hr"].max())
+x_right_raw = x_max_leader + 0.25
+x_left = math.floor(x_min_data / 0.5) * 0.5
+x_right = x_right_raw
+x_ticks_all = hour_ticks(x_left, x_right, step=0.5)
+
+y_min_val = float(xy_df["y_gap_min"].min())  # negative or 0
+y_span = max(1, int(abs(y_min_val)))
+y_ticks = [0] + [-(i) for i in range(1, y_span + 1)]
+y_ticktext = ["0"] + [str(i) for i in range(1, y_span + 1)]
+
+fig.update_xaxes(
+    title="Leader elapsed (h)",
+    tickmode="array",
+    tickvals=x_ticks_all,
+    ticktext=[fmt_hmm(v) for v in x_ticks_all],
+    showgrid=True,
+    zeroline=False,
+    showline=True,
+    mirror=True,
+    ticks="outside",
+)
+
+fig.update_yaxes(
+    title="Time behind leader (min)",
+    tickmode="array",
+    tickvals=y_ticks,
+    ticktext=y_ticktext,           # positive labels
+    range=[0.5, y_min_val - 1],    # 0 at top; negative extends downward
+    showgrid=True,
+    zeroline=True,
+    zerolinecolor="rgba(0,0,0,0.25)",
+    showline=True,
+    mirror=True,
+    ticks="outside",
+)
+
+fig.update_layout(
+    height=520,
+    margin=dict(l=50, r=30, t=30, b=40),
+    annotations=labels,
+)
+
+st.plotly_chart(fig, use_container_width=True)
