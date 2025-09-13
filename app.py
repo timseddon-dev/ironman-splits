@@ -196,10 +196,11 @@ if xy_df.empty:
     st.info("No rows to plot for the current selection. Try selecting more athletes or splits.")
     st.stop()
 
+
 # ======================================
-# 4) Plot: Scatter + Lines + End Labels
+# 4) Plot: Lines + End Labels + Reference Lines
 # ======================================
-# Main scatter markers (legend will be disabled in layout below)
+# Lines only: remove symbols by setting mode="lines" for the main trace
 fig = px.scatter(
     xy_df,
     x="leader_hr",
@@ -209,7 +210,10 @@ fig = px.scatter(
     labels={"leader_hr": "Leader elapsed (hours)", "y_gap_min": "Time behind leader (minutes)"},
 )
 
-# Connect points per athlete (lines)
+# Convert the default marker traces into lines-only
+fig.update_traces(mode="lines", selector=dict(mode="markers"))
+
+# Ensure we also draw explicit line traces for continuity (optional but keeps behavior consistent)
 for nm, grp in xy_df.groupby("name"):
     fig.add_scatter(
         x=grp["leader_hr"],
@@ -227,9 +231,9 @@ last_points = (
          .reset_index(drop=True)[["name", "leader_hr", "y_gap_min"]]
 )
 
-# Offset labels to the right by a fraction of the X-span (min ~0.05 h ≈ 3 minutes)
+# Offset labels to the right; we’ll extend X range accordingly in Section 5
 x_span = max(1e-6, float(xy_df["leader_hr"].max() - xy_df["leader_hr"].min()))
-label_dx = max(0.01 * x_span, 0.05)
+label_dx = max(0.02 * x_span, 0.10)   # push a bit further (~6 minutes min)
 
 for _, row in last_points.iterrows():
     fig.add_scatter(
@@ -243,10 +247,40 @@ for _, row in last_points.iterrows():
         hoverinfo="skip",
     )
 
+# Reference lines at fastest SWIM and BIKE times
+# Find fastest leader times for SWIM and BIKE within the selected range
+swim_x = None
+bike_x = None
+if "SWIM" in leaders["split"].values:
+    swim_td = leaders.loc[leaders["split"] == "SWIM", "leader_td"].min()
+    if pd.notna(swim_td):
+        swim_x = swim_td.total_seconds() / 3600.0
+if "BIKE" in leaders["split"].values:
+    bike_td = leaders.loc[leaders["split"] == "BIKE", "leader_td"].min()
+    if pd.notna(bike_td):
+        bike_x = bike_td.total_seconds() / 3600.0
+
+# Determine the lowest y (most negative) to draw lines down to
+y_lowest = float(xy_df["y_gap_min"].min())
+
+ref_shapes = []
+ref_annotations = []
+if swim_x is not None:
+    ref_shapes.append(dict(type="line", x0=swim_x, x1=swim_x, y0=0, y1=y_lowest,
+                           line=dict(color="#888", width=1, dash="dot")))
+    ref_annotations.append(dict(x=swim_x, y=y_lowest, xanchor="left", yanchor="bottom",
+                                text="SWIM", showarrow=False, font=dict(color="#666", size=11)))
+if bike_x is not None:
+    ref_shapes.append(dict(type="line", x0=bike_x, x1=bike_x, y0=0, y1=y_lowest,
+                           line=dict(color="#888", width=1, dash="dot")))
+    ref_annotations.append(dict(x=bike_x, y=y_lowest, xanchor="left", yanchor="bottom",
+                                text="BIKE", showarrow=False, font=dict(color="#666", size=11)))
+
+
 # ======================================
 # 5) Axes and Layout
 # ======================================
-# X ticks in hours (every 0.5 h by default). Begin at 0 and extend past labels.
+# X ticks in hours but display as h:mm. Begin at 0 and extend past labels so names fit.
 def hour_ticks(series, step=0.5):
     if series.empty:
         return []
@@ -259,19 +293,26 @@ def hour_ticks(series, step=0.5):
         v += step
     return vals
 
-x_ticks_all = hour_ticks(xy_df["leader_hr"], step=0.5)
+x_ticks_all = hour_ticks(xy_df["leader_hr"], step=0.5)  # every 30 minutes
 
 x_max = float(xy_df["leader_hr"].max())
 x_span = max(1e-6, x_max - float(xy_df["leader_hr"].min()))
-label_dx = max(0.01 * x_span, 0.05)  # same as used for label offset
-x_right = x_max + label_dx + 0.05
+label_dx = max(0.02 * x_span, 0.10)  # must match Section 4
+x_right = x_max + label_dx + 0.10    # extra padding for labels
+
+# Helper to format h:mm
+def fmt_hmm(h):
+    total_minutes = int(round(h * 60))
+    hh = total_minutes // 60
+    mm = total_minutes % 60
+    return f"{hh}:{mm:02d}"
 
 fig.update_xaxes(
     tickmode="array",
     tickvals=x_ticks_all,
-    ticktext=[f"{v:.1f}" for v in x_ticks_all],  # 0.0, 0.5, 1.0, ...
-    title="Leader elapsed (hours)",
-    range=[0.0, x_right],  # begin X at 0
+    ticktext=[fmt_hmm(v) for v in x_ticks_all],
+    title="Leader elapsed (h:mm)",
+    range=[0.0, x_right],  # begin X at 0 and extend for labels
     zeroline=True,
     zerolinecolor="#bbb",
     showline=True,
@@ -298,7 +339,7 @@ fig.update_yaxes(
     zerolinecolor="#bbb",
 )
 
-# Keep the Y axis intercepting X at 0 and hide the legend (since series are labeled)
+# Apply reference shapes and annotations; hide legend (labels are on the lines)
 fig.update_layout(
     xaxis=dict(
         range=[0.0, x_right],
@@ -311,9 +352,11 @@ fig.update_layout(
         zeroline=True,
         zerolinecolor="#bbb",
     ),
-    showlegend=False,   # <— remove legend
+    shapes=ref_shapes,
+    annotations=ref_annotations,
+    showlegend=False,
     height=650,
-    margin=dict(l=40, r=120, t=30, b=40),
+    margin=dict(l=40, r=140, t=30, b=40),  # a little more right space for labels
 )
 
 st.plotly_chart(fig, use_container_width=True)
