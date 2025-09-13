@@ -10,8 +10,6 @@ st.set_page_config(page_title="Race Gaps vs Leader", layout="wide")
 st.title("Race Gaps vs Leader")
 
 
-You've really messed this up. Go back through the conversation, look at what you'd written previously at that point and use that. I think the following was your section 0 and 1 at that point, but you should be able to reconstruct it better than me
-
  ======================================
 # 0) Imports, Config, and Constants
 # ======================================
