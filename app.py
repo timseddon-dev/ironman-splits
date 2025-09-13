@@ -107,9 +107,25 @@ def minute_ticks(series: pd.Series, min_step: int = 1):
     step = max(1, min_step)
     return list(range(start, end + 1, step))
 
+# ======================================
+# 2.0) Test Mode Filter: keep only rows with leader elapsed < 7h
+# ======================================
+# Join leader times so we can filter by leader elapsed
+leaders_all = compute_leaders(df)[["split", "leader_td"]]
+df = df.merge(leaders_all, on="split", how="left")
+
+# Compute leader elapsed in hours
+df["leader_hr"] = df["leader_td"].dt.total_seconds() / 3600.0
+
+# Keep only rows strictly before 7 hours for mid-race testing
+df = df[df["leader_hr"] < 7.0].copy()
+
+# Important: drop helper columns you don’t want duplicated later
+# (Sections 3–5 may recompute leader_hr on their own merge)
+df.drop(columns=["leader_hr"], errors="ignore", inplace=True)
 
 # ======================================
-# 2) UI Setup
+# 2.1) UI Setup
 # ======================================
 st.title("Ironman Splits Viewer")
 st.caption("XY view: X = leader elapsed (minutes). Y = minutes behind leader (leader − athlete).")
@@ -166,47 +182,42 @@ if i0 > i1:
 range_splits = splits_order[i0:i1+1]
 
 # ======================================
-# 2.5) Summary Table (Top 10 at ≤ 7h)
+# 2.5) Summary Table (Top 10 on filtered test data)
 # ======================================
-# Build ≤ 7h subset with leader times joined
-leaders_full = compute_leaders(df)
-df_7h = (
-    df.merge(leaders_full[["split", "leader_td"]], on="split", how="left")
+# Since df is already filtered to < 7h, we just compute the live snapshot from df.
+leaders_now = compute_leaders(df)[["split", "leader_td"]]
+df_now = (
+    df.merge(leaders_now, on="split", how="left")
       .dropna(subset=["net_td", "leader_td"])
-      .assign(leader_hr=lambda d: d["leader_td"].dt.total_seconds() / 3600.0)
 )
 
-# Restrict to ≤ 7h
-df_7h = df_7h[df_7h["leader_hr"] <= 7.0].copy()
-
-st.subheader("Race snapshot (Top 10 at ≤ 7h)")
-
-if df_7h.empty:
-    st.info("No data available within the first 7 hours yet.")
+if df_now.empty:
+    st.subheader("Race snapshot (Top 10)")
+    st.info("No data available in the test subset (< 7h).")
 else:
-    # Latest available row per athlete within ≤ 7h
-    latest_7h = (
-        df_7h.sort_values(["name", "leader_td"])
-             .groupby("name", as_index=False)
-             .tail(1)
-             .reset_index(drop=True)
+    # For each athlete, take their latest available row in this filtered data
+    latest_now = (
+        df_now.sort_values(["name", "leader_td"])
+              .groupby("name", as_index=False)
+              .tail(1)
+              .reset_index(drop=True)
     )
 
-    # Compute gap to leader (minutes, non-negative for display)
-    latest_7h["gap_min"] = (latest_7h["net_td"] - latest_7h["leader_td"]).dt.total_seconds() / 60.0
-    latest_7h["gap_min"] = latest_7h["gap_min"].clip(lower=0)
+    # Compute behind leader in minutes (non-negative for display)
+    latest_now["gap_min"] = (latest_now["net_td"] - latest_now["leader_td"]).dt.total_seconds() / 60.0
+    latest_now["gap_min"] = latest_now["gap_min"].clip(lower=0)
 
-    # Order primarily by how far into the race they are (leader_td), then smallest gap
-    snapshot = latest_7h.sort_values(["leader_td", "gap_min"], ascending=[False, True])
+    # Rank by progression (leader_td) then smallest gap
+    snapshot = latest_now.sort_values(["leader_td", "gap_min"], ascending=[False, True])
 
     top10 = (
         snapshot[["name", "split", "gap_min"]]
         .rename(columns={"name": "Athlete", "split": "Latest split", "gap_min": "Behind (min)"})
         .copy()
     )
-
-    # Format gap and show only the top 10
     top10["Behind (min)"] = top10["Behind (min)"].map(lambda x: f"{x:.1f}")
+
+    st.subheader("Race snapshot (Top 10)")
     st.dataframe(top10.head(10).reset_index(drop=True), use_container_width=True, height=320)
 
 # ======================================
