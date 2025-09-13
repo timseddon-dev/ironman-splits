@@ -108,39 +108,22 @@ def minute_ticks(series: pd.Series, min_step: int = 1):
     return list(range(start, end + 1, step))
 
 # ======================================
-# 2.0) Test Mode Filter: keep only rows with leader elapsed < 7h
+# 2.0) Test Mode Filter: keep only rows where athlete elapsed < 7h
 # ======================================
-# Compute leader time per split directly (earliest net_td across athletes at each split)
-leaders_all = (
-    df.dropna(subset=["net_td"])
-      .sort_values(["split", "net_td"])
-      .groupby("split", as_index=False)
-      .agg(leader_td=("net_td", "min"))
-)
+# Preconditions: df is already loaded and has at least columns ["name", "split", "net_td"].
+# net_td is a pandas Timedelta (elapsed for the athlete at that split).
 
-# Join leader times so we can filter by leader elapsed
-df = df.merge(leaders_all, on="split", how="left")
+if "net_td" not in df.columns:
+    st.error("Test filter requires a 'net_td' Timedelta column on df. Make sure df is loaded before Section 2.0.")
+    st.stop()
 
-# Compute leader elapsed in hours
-df["leader_hr"] = df["leader_td"].dt.total_seconds() / 3600.0
+# Keep rows where the athlete's elapsed < 7 hours
+seven_hours = pd.to_timedelta(7, unit="h")
+df = df.dropna(subset=["net_td"]).copy()
+df = df[df["net_td"] < seven_hours].copy()
 
-# Keep only rows strictly before 7 hours for mid-race testing
-df = df[df["leader_hr"] < 7.0].copy()
-
-# Clean up helper column if later sections recompute it
-df.drop(columns=["leader_hr"], errors="ignore", inplace=True)
-# ======================================
-# 2.1) UI controls
-# ======================================
-with st.expander("Test mode", expanded=True):
-    test_mode = st.checkbox("Limit dataset to athlete elapsed < 7 hours", value=True)
-
-# Your existing UI widgets follow (athlete multiselect, From/To split, etc.)
-# Example:
-# selected = st.multiselect("Athletes (ordered by current position)", all_athletes, default=default_athletes)
-# from_split = st.selectbox("From split", available_from_splits, index=available_from_splits.index("SWIM"))
-# to_split = st.selectbox("To split", available_to_splits, index=available_to_splits.index("FINISH"))
-
+# Optional: if you want to still compute leader_td later using your existing functions, do nothing else here.
+# We do NOT add leader_hr here; later sections can compute what they need.
 
 # ======================================
 # 2.2) Apply test filter (per-athlete) if enabled
