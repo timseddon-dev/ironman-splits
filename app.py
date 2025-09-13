@@ -17,16 +17,15 @@ except Exception:
 
 DATA_FILE = "long.csv"
 
+
 # ======================================
 # 1) Data load and normalization
 # ======================================
 import os, math, re
-from pathlib import Path
 import pandas as pd
 import streamlit as st
 
 DATA_FILE = "long.csv"
-
 st.set_page_config(page_title="Race Gaps vs Leader", layout="wide")
 
 @st.cache_data(ttl=60, show_spinner=True)
@@ -47,8 +46,141 @@ def load_data(path: str) -> pd.DataFrame:
     if "km" in df.columns:
         df["km"] = pd.to_numeric(df["km"], errors="coerce")
 
-    # Ensure net_td exists (derive from net
+    # Ensure net_td exists (derive from netTime if needed)
+    def _parse_td(x):
+        if pd.isna(x): return pd.NaT
+        s = str(x).strip()
+        if re.fullmatch(r"\d:\d{2}:\d{2}(\.\d{1,3})?", s):
+            s = "0" + s
+        try:
+            return pd.to_timedelta(s)
+        except Exception:
+            parts = s.split(":")
+            try:
+                if len(parts) == 2:
+                    m, sec = int(parts[0]), int(parts[1])
+                    return pd.to_timedelta(m, unit="m") + pd.to_timedelta(sec, unit="s")
+                elif len(parts) == 1 and parts[0].isdigit():
+                    return pd.to_timedelta(int(parts[0]), unit="s")
+            except Exception:
+                return pd.NaT
+            return pd.NaT
 
+    if "net_td" in df.columns:
+        try:
+            df["net_td"] = pd.to_timedelta(df["net_td"])
+        except Exception:
+            df["net_td"] = df["net_td"].apply(_parse_td)
+    elif "netTime" in df.columns:
+        try:
+            df["net_td"] = pd.to_timedelta(df["netTime"])
+        except Exception:
+            df["net_td"] = df["netTime"].apply(_parse_td)
+    else:
+        # Keep going; later logic will warn if elapsed is required
+        df["net_td"] = pd.NaT
+
+    # Drop rows missing essentials if both columns exist
+    if "name" in df.columns and "split" in df.columns:
+        df = df.dropna(subset=["name", "split"]).copy()
+
+    return df
+
+def expected_order():
+    return (
+        ["START", "SWIM", "T1"]
+        + [f"BIKE{i}" for i in range(1, 26)] + ["BIKE", "T2"]
+        + [f"RUN{i}" for i in range(1, 23)] + ["RUN", "FINISH"]
+    )
+
+def available_splits_in_order(_df: pd.DataFrame):
+    if not isinstance(_df, pd.DataFrame) or "split" not in _df.columns:
+        return []
+    order = expected_order()
+    present = [s for s in order if s in _df["split"].dropna().unique().tolist()]
+    if present:
+        return present
+    d = _df.dropna(subset=["net_td"]).copy() if "net_td" in _df.columns else _df.copy()
+    if d.empty or "net_td" not in d.columns:
+        return sorted(_df["split"].dropna().unique().tolist())
+    tmp = (
+        d.sort_values(["split", "net_td"])
+         .groupby("split", as_index=False)
+         .agg(first_td=("net_td", "min"))
+         .sort_values("first_td")
+    )
+    return tmp["split"].tolist()
+
+def compute_leaders(_df: pd.DataFrame) -> pd.DataFrame:
+    if not isinstance(_df, pd.DataFrame) or "net_td" not in _df.columns:
+        return pd.DataFrame(columns=["split", "leader_td"])
+    d = _df.dropna(subset=["net_td"]).copy()
+    if d.empty:
+        return pd.DataFrame(columns=["split", "leader_td"])
+    return (
+        d.sort_values(["split", "net_td"])
+         .groupby("split", as_index=False)
+         .agg(leader_td=("net_td", "min"))
+    )
+
+def friendly_split_label(split: str, km_lookup: dict | None = None) -> str:
+    s = str(split).upper()
+    if s == "FINISH":
+        return "Finish"
+    if s == "SWIM":
+        if km_lookup and s in km_lookup and pd.notna(km_lookup[s]):
+            return f"Swim {km_lookup[s]:.1f} km"
+        return "Swim 3.8 km"
+    if s in ("T1", "T2"):
+        return s
+    if km_lookup and s in km_lookup and pd.notna(km_lookup[s]):
+        if s.startswith("BIKE"):
+            return f"Bike {km_lookup[s]:.1f} km"
+        if s.startswith("RUN"):
+            return f"Run {km_lookup[s]:.1f} km"
+    if s.startswith("BIKE"):
+        return "Bike"
+    if s.startswith("RUN"):
+        return "Run"
+    return s
+
+def fmt_hmm(hours_float: float) -> str:
+    total_minutes = int(round(hours_float * 60))
+    hh = total_minutes // 60
+    mm = total_minutes % 60
+    return f"{hh}:{mm:02d}"
+
+def hour_ticks(lo_h: float, hi_h: float, step: float = 0.5) -> list:
+    start = math.floor(lo_h / step) * step
+    end = math.ceil(hi_h / step) * step
+    vals, v = [], start
+    while v <= end + 1e-9:
+        vals.append(round(v, 6))
+        v += step
+    return vals
+
+# Load data first so df exists before Section 2
+df = load_data(DATA_FILE)
+if not isinstance(df, pd.DataFrame) or df.empty:
+    st.warning("No data loaded from long.csv.")
+    st.stop()
+
+# Per-split km lookup (max km per split)
+km_lookup = None
+if "km" in df.columns:
+    km_lookup = (
+        df.groupby("split", as_index=False)["km"]
+          .max()
+          .set_index("split")["km"]
+          .to_dict()
+    )
+
+# Ensure split categorical order is set before Section 2
+splits_ordered_master = available_splits_in_order(df)
+try:
+    df["split"] = pd.Categorical(df["split"], categories=splits_ordered_master, ordered=True)
+except Exception:
+    pass
 
 
 # ======================================
