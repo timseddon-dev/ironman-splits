@@ -159,35 +159,70 @@ def hour_ticks(lo_h: float, hi_h: float, step: float = 0.5) -> list:
 # 2) UI and options (Test mode, positions, athlete selection, range)
 # ======================================
 
+# --- Test mode (safe) ---
 with st.expander("Test mode", expanded=True):
     test_mode = st.checkbox("Enable test mode (limit dataset by athlete elapsed < Max hours)", value=False)
     max_hours = st.slider("Max hours", 1.0, 12.0, 5.5, 0.5)
 
 if test_mode:
-    # Guard that net_td exists
-    if "net_td" not in df.columns:
-        st.error("Test filter requires a 'net_td' Timedelta column. Check long.csv (needs netTime or net_td).")
+    # Ensure df exists and has elapsed time as timedelta
+    if not isinstance(df, pd.DataFrame):
+        st.error("Data not loaded.")
         st.stop()
 
+    if "net_td" not in df.columns:
+        # Try to derive from netTime if present
+        if "netTime" in df.columns:
+            try:
+                df["net_td"] = pd.to_timedelta(df["netTime"])
+            except Exception:
+                # Best-effort parsing
+                def _parse_td(_s):
+                    if pd.isna(_s): return pd.NaT
+                    s = str(_s).strip()
+                    import re as _re
+                    if _re.fullmatch(r"\d:\d{2}:\d{2}(\.\d{1,3})?", s):
+                        s = "0" + s
+                    try:
+                        return pd.to_timedelta(s)
+                    except Exception:
+                        parts = s.split(":")
+                        try:
+                            if len(parts) == 2:
+                                m, sec = int(parts[0]), int(parts[1])
+                                return pd.to_timedelta(m, unit="m") + pd.to_timedelta(sec, unit="s")
+                            elif len(parts) == 1 and parts[0].isdigit():
+                                return pd.to_timedelta(int(parts[0]), unit="s")
+                        except Exception:
+                            return pd.NaT
+                        return pd.NaT
+                df["net_td"] = df["netTime"].apply(_parse_td)
+        else:
+            st.error("Test filter requires an elapsed time column: 'net_td' or 'netTime' to derive it from.")
+            st.stop()
+
     max_td = pd.to_timedelta(max_hours, unit="h")
-    # Count rows before filtering
-    before_rows = int(len(df)) if isinstance(df, pd.DataFrame) else 0
-
-    # Keep only rows with valid elapsed and below threshold
-    d = df.dropna(subset=["net_td"])
+    before_rows = int(len(df))
+    d = df.dropna(subset=["net_td"]).copy()
     df = d[d["net_td"] < max_td].copy()
-
     after_rows = len(df)
     st.caption(f"Test mode active: {after_rows:,} rows (from {before_rows:,}) with athlete elapsed < {max_hours:.1f} h")
-# Recompute split categories after any filtering
+
+# After any filtering, re-assert split category order
 splits_ordered_master = available_splits_in_order(df)
 try:
     df["split"] = pd.Categorical(df["split"], categories=splits_ordered_master, ordered=True)
 except Exception:
     pass
 
-# 2.0) Positions + Athlete options (ordered by current position) and defaults
-leaders_for_pos = compute_leaders(df)
+# --- Positions and athlete options (ordered by current position) ---
+leaders_for_pos = (
+    df.dropna(subset=["net_td"])
+      .sort_values(["split", "net_td"])
+      .groupby("split", as_index=False)
+      .agg(leader_td=("net_td", "min"))
+)
+
 latest_per_athlete = (
     df.merge(leaders_for_pos, on="split", how="left")
       .dropna(subset=["net_td"])
@@ -196,20 +231,25 @@ latest_per_athlete = (
       .tail(1)
       .reset_index(drop=True)
 )
-# Position by latest net time
+
+# Position rank by latest net time
 latest_per_athlete["pos"] = latest_per_athlete["net_td"].rank(method="first").astype(int)
+
 athletes_ordered = latest_per_athlete.sort_values("pos")[["pos", "name"]].reset_index(drop=True)
 
-def make_label(row):
+def _label(row):
     return f"P{row['pos']:02d}  {row['name']}"
-athlete_labels = athletes_ordered.apply(make_label, axis=1).tolist()
+
+athlete_labels = athletes_ordered.apply(_label, axis=1).tolist()
 athlete_names_in_order = athletes_ordered["name"].tolist()
-default_selection_names = athlete_names_in_order[:20]
+
+default_selection_names = athlete_names_in_order[:20]  # top 20 by current position
+
 label_to_name = dict(zip(athlete_labels, athlete_names_in_order))
 name_to_label = {v: k for k, v in label_to_name.items()}
 
-# 2.1) UI controls (ordered by position; default top 20)
-colA, colB = st.columns([3, 2])
+# --- UI controls: athlete multiselect + split range ---
+colA, colB = st.columns([3, 2], gap="large")
 
 with colA:
     st.caption("Athletes (ordered by current position)")
@@ -220,6 +260,8 @@ with colA:
         label_visibility="collapsed",
     )
     selected = [label_to_name[lbl] for lbl in selected_labels]
+    if not selected:
+        selected = default_selection_names
 
 with colB:
     st.caption("Split range")
@@ -228,9 +270,6 @@ with colB:
     to_idx = splits_ordered.index("FINISH") if "FINISH" in splits_ordered else len(splits_ordered) - 1
     from_split = st.selectbox("From split", options=splits_ordered, index=from_idx)
     to_split = st.selectbox("To split", options=splits_ordered, index=to_idx)
-
-if not selected:
-    selected = default_selection_names
 
 # ======================================
 # 2.5) Race snapshot (Top 10)
