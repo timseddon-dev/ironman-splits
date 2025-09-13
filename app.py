@@ -272,11 +272,15 @@ else:
     page_df = table_df.iloc[start:end].reset_index(drop=True)
 
     # Checkbox state per athlete in session (default top 10 checked)
-    if "plot_checks" not in st.session_state:
-        st.session_state.plot_checks = {}
-        top10_names = latest_now.sort_values("#").head(10)["Athlete"].tolist() if "#” in table_df.columns else latest_now.sort_values("rank").head(10)["name"].tolist()
-        for nm in latest_now["name"]:
-            st.session_state.plot_checks[nm] = (nm in top10_names)
+if "plot_checks" not in st.session_state:
+    st.session_state.plot_checks = {}
+
+    # Default to top 10 by current rank
+    top10_names = latest_now.sort_values("rank").head(10)["name"].tolist()
+
+    # Initialize every athlete's checkbox (True if in top10_names)
+    for nm in latest_now["name"]:
+        st.session_state.plot_checks[nm] = (nm in top10_names)
 
     # Header
     header_cols = st.columns([1.0, 3.0, 3.0, 2.0])  # Plot | Athlete | Latest split | Behind
