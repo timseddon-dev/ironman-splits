@@ -36,11 +36,11 @@ def load_data(path: str) -> pd.DataFrame:
         return pd.DataFrame()
     df = pd.read_csv(path)
 
-    # Normalize text columns
-    if "name" in df.columns:
-        df["name"] = df["name"].astype(str).strip()
-    if "split" in df.columns:
-        df["split"] = df["split"].astype(str).str.strip().str.upper()
+   # Normalize text columns
+if "name" in df.columns:
+    df["name"] = df["name"].astype(str).str.strip()
+if "split" in df.columns:
+    df["split"] = df["split"].astype(str).str.strip().str.upper()
 
     # Convert km if present
     if "km" in df.columns:
