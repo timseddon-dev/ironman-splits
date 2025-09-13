@@ -1,4 +1,5 @@
 # app.py
+import json
 import math
 import re
 from datetime import timedelta
@@ -9,24 +10,21 @@ import requests
 import streamlit as st
 from bs4 import BeautifulSoup
 
-# ======================================
-# Configuration
-# ======================================
-RTRT_URL = "https://app.rtrt.me/IRM-WORLDCHAMPIONSHIP-MEN-2024/leaderboard/pro-men-ironman/"
-
 st.set_page_config(page_title="Race Gaps vs Leader", layout="wide")
 st.title("Race Gaps vs Leader")
 
-# ======================================
+RTRT_URL = "https://app.rtrt.me/IRM-WORLDCHAMPIONSHIP-MEN-2024/leaderboard/pro-men-ironman/"
+
+# --------------------------
 # Helpers
-# ======================================
+# --------------------------
 def parse_hms_to_timedelta(s: str) -> pd.Timedelta | None:
     if s is None:
         return None
     s = s.strip()
     if not s:
         return None
-    # Accept formats like H:MM:SS or MM:SS; also tolerate missing hours
+    # Accept H:MM:SS, MM:SS, or seconds
     parts = s.split(":")
     try:
         if len(parts) == 3:
@@ -34,7 +32,6 @@ def parse_hms_to_timedelta(s: str) -> pd.Timedelta | None:
         elif len(parts) == 2:
             h, m, sec = 0, int(parts[0]), int(parts[1])
         else:
-            # try seconds
             sec = int(float(s))
             h, m = 0, 0
         return pd.to_timedelta(hours=h, minutes=m, seconds=sec)
@@ -83,97 +80,180 @@ def split_range(splits, start_key, end_key):
     else:
         return splits[i1:i0+1]
 
-# ======================================
-# Data fetch and parse from RTRT
-# ======================================
+# --------------------------
+# Robust RTRT extraction
+# --------------------------
 @st.cache_data(show_spinner=True, ttl=300)
-def load_rtrt_df(url: str) -> pd.DataFrame:
-    # Fetch HTML
-    headers = {
-        "User-Agent": "Mozilla/5.0 (compatible; BearlyFocus/1.0; +https://bearly.ai)"
-    }
+def fetch_rtrt_html(url: str) -> str:
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; BearlyFocus/1.0)"}
     r = requests.get(url, headers=headers, timeout=30)
     r.raise_for_status()
-    html = r.text
+    return r.text
 
-    # Parse
-    soup = BeautifulSoup(html, "html.parser")
-
-    # Heuristic: RTRT renders a table of athletes with splits. Markup may be nested.
-    # We'll extract rows where athlete names appear, and per-split elapsed.
-    # Fallback approach: look for rows with data-label or aria-label attributes.
-
-    # Collect candidate rows
-    rows = []
-    # Attempt 1: data rows with role="row"
-    for tr in soup.select("tr"):
-        txt = tr.get_text(" ", strip=True)
+def try_parse_embedded_json(soup: BeautifulSoup) -> pd.DataFrame | None:
+    # Look for obvious JSON structures in script tags
+    # Heuristic: find the largest JSON-like blob with keys that could include athletes/splits/times
+    scripts = soup.find_all("script")
+    best = None
+    best_len = 0
+    for sc in scripts:
+        txt = sc.string or sc.get_text()
         if not txt:
             continue
-        # crude name detection: contains a space and no excessive punctuation
+        # crude JSON object detection
+        if "{" in txt and "}" in txt and any(k in txt for k in ["athlete", "name", "split", "time", "elapsed", "leaderboard"]):
+            # Try to extract the biggest {...} block
+            m = re.search(r"\{.*\}", txt, flags=re.DOTALL)
+            if m:
+                blob = m.group(0)
+                if len(blob) > best_len:
+                    best = blob
+                    best_len = len(blob)
+    if not best:
+        return None
+
+    # Try to load as JSON (tolerate trailing commas)
+    try:
+        data = json.loads(best)
+    except Exception:
+        # Attempt lax cleaning
+        cleaned = re.sub(r",\s*}", "}", best)
+        cleaned = re.sub(r",\s*]", "]", cleaned)
+        try:
+            data = json.loads(cleaned)
+        except Exception:
+            return None
+
+    # Navigate to athlete timing if possible (structure is unknown; search recursively)
+    rows = []
+
+    def walk(node, name_ctx=None, splits_ctx=None):
+        nonlocal rows
+        if isinstance(node, dict):
+            # capture name
+            if name_ctx is None and "name" in node and isinstance(node["name"], str):
+                name_ctx = node["name"]
+            # capture time-like values paired with split-like keys
+            # if we see lists of splits/times, collect them
+            if "splits" in node and isinstance(node["splits"], list):
+                splits_ctx = node["splits"]
+            # direct fields with time
+            if "elapsed" in node and isinstance(node["elapsed"], (str, int, float)):
+                td = parse_hms_to_timedelta(str(node["elapsed"]))
+                if td is not None:
+                    # split label if present
+                    sp = node.get("split") or node.get("label") or None
+                    if sp is None and splits_ctx and isinstance(splits_ctx, list):
+                        sp = splits_ctx[0] if splits_ctx else None
+                    rows.append({"name": name_ctx or "Unknown", "split": sp or None, "net_td": td})
+
+            for k, v in node.items():
+                walk(v, name_ctx=name_ctx, splits_ctx=splits_ctx)
+        elif isinstance(node, list):
+            for v in node:
+                walk(v, name_ctx=name_ctx, splits_ctx=splits_ctx)
+
+    walk(data)
+
+    if not rows:
+        return None
+
+    df = pd.DataFrame(rows).dropna(subset=["net_td"])
+    # If many rows are missing split names, we’ll order generically
+    if "split" not in df.columns or df["split"].isna().all():
+        # generate per-athlete sequence S1, S2, ...
+        out = []
+        for nm, g in df.groupby("name"):
+            g = g.sort_values("net_td")
+            out.append(pd.DataFrame({
+                "name": nm,
+                "split": ["START"] + [f"S{i}" for i in range(1, len(g) + 1)],
+                "net_td": [pd.to_timedelta(0, unit="s")] + g["net_td"].tolist()
+            }))
+        df2 = pd.concat(out, ignore_index=True)
+        order = df2.groupby("split")["net_td"].min().sort_values().index.tolist()
+        df2["split"] = pd.Categorical(df2["split"], categories=order, ordered=True)
+        return df2.sort_values(["split", "name"]).reset_index(drop=True)
+
+    # Otherwise, make sure a START exists per athlete
+    out = []
+    for nm, g in df.groupby("name"):
+        g = g.sort_values("net_td")
+        # ensure a START
+        g2 = pd.concat([
+            pd.DataFrame([{"name": nm, "split": "START", "net_td": pd.to_timedelta(0, unit="s")}]),
+            g[["name", "split", "net_td"]]
+        ], ignore_index=True)
+        out.append(g2)
+    df2 = pd.concat(out, ignore_index=True)
+    order = df2.groupby("split")["net_td"].min().sort_values().index.tolist()
+    df2["split"] = pd.Categorical(df2["split"], categories=order, ordered=True)
+    return df2.sort_values(["split", "name"]).reset_index(drop=True)
+
+def fallback_parse_table(soup: BeautifulSoup) -> pd.DataFrame:
+    # Fallback: extract per-row sequential time-like strings and build generic splits
+    rows = []
+    for tr in soup.select("tr"):
         tds = tr.find_all(["td", "th"])
         if len(tds) < 3:
             continue
-        # Find a probable name cell
-        name_cell = None
+        # probable name
+        name = None
         for td in tds:
             t = td.get_text(" ", strip=True)
-            if t and len(t.split()) >= 2 and not re.search(r"\d{2}:\d{2}", t):
-                name_cell = t
+            if t and len(t.split()) >= 2 and not re.search(r"\d{1,2}:\d{2}(:\d{2})?", t):
+                name = t
                 break
-        if not name_cell:
+        if not name:
             continue
-
-        # Extract splits with time-like strings
-        # We will capture pairs (split_label, elapsed_text)
-        splits = []
+        # collect times
+        times = []
         for td in tds:
             t = td.get_text(" ", strip=True)
             if re.search(r"\b\d{1,2}:\d{2}(:\d{2})?\b", t):
-                splits.append(t)
+                times.append(t)
+        if times:
+            rows.append({"name": name, "times": times})
 
-        if splits:
-            rows.append({"name": name_cell, "splits": splits})
-
-    # If nothing found, bail out with an informative error
     if not rows:
-        raise RuntimeError("Could not parse RTRT page. The site structure may have changed.")
+        raise RuntimeError("Unable to parse RTRT table structure.")
 
-    # Normalize into (name, split, net_td)
-    # We don't have explicit split keys from HTML reliably; we infer order:
-    # START, SWIM, T1, BIKE..., T2, RUN..., FINISH — but we only have elapsed times sequence.
-    # We'll generate generic labels: START (0:00:00), then S1, S2, ... in observed order.
-    df_list = []
-    generic_splits = ["START"] + [f"S{i}" for i in range(1, 200)]
+    out = []
     for row in rows:
-        name = row["name"]
-        elapsed_list = row["splits"]
-        # Force START = 0
-        df_list.append({"name": name, "split": "START", "net_td": pd.to_timedelta(0, unit="s")})
-        for i, t in enumerate(elapsed_list, start=1):
-            td = parse_hms_to_timedelta(t)
+        nm = row["name"]
+        out.append({"name": nm, "split": "START", "net_td": pd.to_timedelta(0, unit="s")})
+        for i, ts in enumerate(row["times"], start=1):
+            td = parse_hms_to_timedelta(ts)
             if td is not None:
-                df_list.append({"name": name, "split": generic_splits[i], "net_td": td})
+                out.append({"name": nm, "split": f"S{i}", "net_td": td})
+    df = pd.DataFrame(out)
+    order = df.groupby("split")["net_td"].min().sort_values().index.tolist()
+    df["split"] = pd.Categorical(df["split"], categories=order, ordered=True)
+    return df.sort_values(["split", "name"]).reset_index(drop=True)
 
-    df = pd.DataFrame(df_list)
-    # Order splits by earliest occurrence time
-    if not df.empty:
-        order = df.groupby("split")["net_td"].min().sort_values().index.tolist()
-        df["split"] = pd.Categorical(df["split"], categories=order, ordered=True)
-        df = df.sort_values(["split", "name"]).reset_index(drop=True)
-    return df
+@st.cache_data(show_spinner=True, ttl=300)
+def load_rtrt_df(url: str) -> pd.DataFrame:
+    html = fetch_rtrt_html(url)
+    soup = BeautifulSoup(html, "html.parser")
+    df = try_parse_embedded_json(soup)
+    if df is not None and not df.empty:
+        return df
+    # fallback
+    return fallback_parse_table(soup)
 
-# Load live data
+# --------------------------
+# Load data
+# --------------------------
 try:
     df = load_rtrt_df(RTRT_URL)
-    st.caption("Data source: RTRT leaderboard (parsed live).")
+    st.caption("Data source: RTRT leaderboard (live parsed).")
 except Exception as e:
     st.error(f"Failed to fetch/parse RTRT data. Details: {e}")
     st.stop()
 
-# ======================================
-# 2) UI controls
-# ======================================
+# --------------------------
+# UI
+# --------------------------
 with st.expander("Test mode", expanded=True):
     test_mode = st.checkbox("Enable test mode (limit dataset to athlete elapsed < Max hours)", value=False)
     max_hours = st.slider("Max hours", 1.0, 12.0, 7.0, 0.5)
@@ -199,17 +279,15 @@ if test_mode:
     df = df[df["net_td"] < max_td].copy()
     st.caption(f"Test mode active: {len(df):,} rows (from {before:,}) with athlete elapsed < {max_hours:.1f}h")
 
-# Early guard
 if df.empty or len(selected) == 0 or len(splits_ordered) == 0:
     st.info("Please ensure there is data and at least one athlete selected.")
     st.stop()
 
-# Range of splits inclusive
 range_splits = split_range(splits_ordered, from_split, to_split)
 
-# ======================================
-# 3) Summary table (Top 10 on current dataset)
-# ======================================
+# --------------------------
+# Snapshot table (Top 10)
+# --------------------------
 leaders_now = compute_leaders(df)
 df_now = df.merge(leaders_now, on="split", how="left").dropna(subset=["net_td", "leader_td"])
 
@@ -234,15 +312,14 @@ else:
     top10["Behind (min)"] = top10["Behind (min)"].map(lambda x: f"{x:.1f}")
     st.dataframe(top10.head(10).reset_index(drop=True), use_container_width=True, height=320)
 
-# ======================================
-# 4) Data prep for plot
-# ======================================
+# --------------------------
+# Plot prep
+# --------------------------
 sel = df[df["name"].isin(selected) & df["split"].isin(range_splits)].copy()
 xy_df = sel.merge(leaders_now, on="split", how="left").dropna(subset=["net_td", "leader_td"])
 xy_df["leader_hr"] = xy_df["leader_td"].dt.total_seconds() / 3600.0
 xy_df["y_gap_min"] = (xy_df["leader_td"] - xy_df["net_td"]).dt.total_seconds() / 60.0
 
-# START point only when From split == START (our generic first split)
 include_start = (len(range_splits) > 0 and str(range_splits[0]).upper() == "START")
 if include_start:
     start_rows = pd.DataFrame({
@@ -260,9 +337,9 @@ if xy_df.empty:
     st.info("No rows to plot for the current selection.")
     st.stop()
 
-# ======================================
-# 5) Plot
-# ======================================
+# --------------------------
+# Plot
+# --------------------------
 fig = go.Figure()
 for nm, g in xy_df.groupby("name", sort=False):
     g = g.sort_values("leader_hr")
@@ -301,19 +378,13 @@ for i, row in last_points.iterrows():
         font=dict(size=12, color="rgba(0,0,0,1)"),
     ))
 
-# Reference lines: we don't have explicit SWIM/BIKE labels from RTRT generic splits,
-# so we skip them here (we only have START, S1, S2, ... inferred).
-# If later we map generic splits to disciplines, we can re-enable markers.
-
-# X axis bounds: left = first visible point snapped to prev 30-min; right = latest leader time + 0.5h.
+# X axis bounds
 x_min_data = float(xy_df["leader_hr"].min())
 leaders_in_xy = xy_df.groupby("split", as_index=False)["leader_hr"].max()
 x_max_leader = float(leaders_in_xy["leader_hr"].max()) if not leaders_in_xy.empty else float(xy_df["leader_hr"].max())
 x_right_raw = x_max_leader + 0.5
 x_left = math.floor(x_min_data / 0.5) * 0.5
-
-# If test mode is active, also cap right bound at Max hours
-x_right = min(x_right_raw, float(max_hours)) if test_mode else x_right_raw
+x_right = min(x_right_raw, float(st.session_state.get("max_hours_val", 12.0))) if (test_mode and "max_hours_val" in st.session_state) else (min(x_right_raw, float(max_hours)) if test_mode else x_right_raw)
 
 x_ticks_all = hour_ticks(x_left, x_right, step=0.5)
 
@@ -353,4 +424,7 @@ fig.update_layout(
     annotations=end_annotations,
     showlegend=False,
     height=650,
-    margin=dict(l=40, r=160, t=30
+    margin=dict(l=40, r=160, t=30, b=40),
+)
+
+st.plotly_chart(fig, use_container_width=True)
