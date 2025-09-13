@@ -356,6 +356,7 @@ else:
     # Final list for plotting
     selected_for_plot = [nm for nm, on in st.session_state.plot_checks.items() if on]
 
+
 # ======================================
 # 4) Plot: Behind leader vs leader elapsed (0 at top, time behind downward)
 # ======================================
