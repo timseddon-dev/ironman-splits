@@ -272,22 +272,32 @@ if "BIKE" in leaders["split"].values:
 # ======================================
 # 5) Axes and Layout
 # ======================================
-# X ticks in hours but display as h:mm. Begin at 0 and extend +30 minutes for label space.
-def hour_ticks(series, step=0.5):
-    if series.empty:
-        return []
-    lo, hi = float(series.min()), float(series.max())
-    start = math.floor(lo / step) * step
-    end = math.ceil(hi / step) * step
+# X ticks in hours but display as h:mm. Start at the beginning of the selected range,
+# snapped back to the previous 30-minute mark, and extend +30 minutes past the max.
+def hour_ticks(lo_h, hi_h, step=0.5):
+    start = math.floor(lo_h / step) * step
+    end = math.ceil(hi_h / step) * step
     vals, v = [], start
     while v <= end + 1e-9:
         vals.append(round(v, 6))
         v += step
     return vals
 
-x_ticks_all = hour_ticks(xy_df["leader_hr"], step=0.5)
-x_max = float(xy_df["leader_hr"].max())
-x_right = x_max + 0.5  # 30 min padding
+# Determine visible X min from data in the selected range
+if xy_df.empty:
+    st.info("No rows to plot for the current selection. Try selecting more athletes or splits.")
+    st.stop()
+
+x_min_data = float(xy_df["leader_hr"].min())
+x_max_data = float(xy_df["leader_hr"].max())
+
+# Snap start to previous 30-minute point relative to the first visible data point
+x_left = math.floor(x_min_data / 0.5) * 0.5
+# Always provide 30 minutes of padding at the right for labels
+x_right = x_max_data + 0.5
+
+# Build tick values at 30-minute spacing across the snapped domain
+x_ticks_all = hour_ticks(x_left, x_right, step=0.5)
 
 def fmt_hmm(h):
     total_minutes = int(round(h * 60))
@@ -300,7 +310,7 @@ fig.update_xaxes(
     tickvals=x_ticks_all,
     ticktext=[fmt_hmm(v) for v in x_ticks_all],
     title="Leader elapsed (h:mm)",
-    range=[0.0, x_right],
+    range=[x_left, x_right],
     zeroline=True,
     zerolinecolor="#bbb",
     showline=True,
@@ -330,17 +340,22 @@ fig.update_yaxes(
 # Reference lines down to the axis minimum tick
 axis_floor = y_start
 ref_shapes = []
-if swim_x is not None:
-    ref_shapes.append(dict(type="line", x0=swim_x, x1=swim_x, y0=0, y1=axis_floor,
-                           line=dict(color="#888", width=1, dash="dot")))
-if bike_x is not None:
-    ref_shapes.append(dict(type="line", x0=bike_x, x1=bike_x, y0=0, y1=axis_floor,
-                           line=dict(color="#888", width=1, dash="dot")))
+if "SWIM" in leaders["split"].values:
+    swim_td = leaders.loc[leaders["split"] == "SWIM", "leader_td"].min()
+    if pd.notna(swim_td):
+        swim_x = swim_td.total_seconds() / 3600.0
+        ref_shapes.append(dict(type="line", x0=swim_x, x1=swim_x, y0=0, y1=axis_floor,
+                               line=dict(color="#888", width=1, dash="dot")))
+if "BIKE" in leaders["split"].values:
+    bike_td = leaders.loc[leaders["split"] == "BIKE", "leader_td"].min()
+    if pd.notna(bike_td):
+        bike_x = bike_td.total_seconds() / 3600.0
+        ref_shapes.append(dict(type="line", x0=bike_x, x1=bike_x, y0=0, y1=axis_floor,
+                               line=dict(color="#888", width=1, dash="dot")))
 
-# IMPORTANT: attach annotations to layout (this is what was missing if labels vanished)
 fig.update_layout(
     xaxis=dict(
-        range=[0.0, x_right],
+        range=[x_left, x_right],
         zeroline=True,
         zerolinecolor="#bbb",
         constrain="domain",
@@ -351,6 +366,7 @@ fig.update_layout(
         zerolinecolor="#bbb",
     ),
     shapes=ref_shapes,
+    # keep your annotation labels and legend setting from earlier:
     annotations=end_annotations,
     showlegend=False,
     height=650,
