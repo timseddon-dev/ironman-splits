@@ -110,8 +110,15 @@ def minute_ticks(series: pd.Series, min_step: int = 1):
 # ======================================
 # 2.0) Test Mode Filter: keep only rows with leader elapsed < 7h
 # ======================================
+# Compute leader time per split directly (earliest net_td across athletes at each split)
+leaders_all = (
+    df.dropna(subset=["net_td"])
+      .sort_values(["split", "net_td"])
+      .groupby("split", as_index=False)
+      .agg(leader_td=("net_td", "min"))
+)
+
 # Join leader times so we can filter by leader elapsed
-leaders_all = compute_leaders(df)[["split", "leader_td"]]
 df = df.merge(leaders_all, on="split", how="left")
 
 # Compute leader elapsed in hours
@@ -120,66 +127,8 @@ df["leader_hr"] = df["leader_td"].dt.total_seconds() / 3600.0
 # Keep only rows strictly before 7 hours for mid-race testing
 df = df[df["leader_hr"] < 7.0].copy()
 
-# Important: drop helper columns you don’t want duplicated later
-# (Sections 3–5 may recompute leader_hr on their own merge)
+# Clean up helper column if later sections recompute it
 df.drop(columns=["leader_hr"], errors="ignore", inplace=True)
-
-# ======================================
-# 2.1) UI Setup
-# ======================================
-st.title("Ironman Splits Viewer")
-st.caption("XY view: X = leader elapsed (minutes). Y = minutes behind leader (leader − athlete).")
-
-df = load_data(DATA_FILE)
-if df.empty:
-    st.warning("No data found yet. The scheduled job will populate long.csv shortly. Try Rerun in a minute.")
-    st.stop()
-
-splits_order = available_splits_in_order(df)
-
-# Athlete picker ordered by current position at latest split
-pos_df = compute_positions(df)
-latest_split = latest_common_split(df)
-if latest_split is not None:
-    latest_pos = (
-        pos_df[pos_df["split"] == latest_split][["name", "pos"]]
-        .dropna(subset=["pos"])
-        .sort_values("pos", ascending=True)
-    )
-    ordered_names = latest_pos["name"].tolist() + [n for n in df["name"].unique() if n not in latest_pos["name"].values]
-else:
-    ordered_names = sorted(df["name"].dropna().unique().tolist())
-
-left, right = st.columns([1, 3], gap="large")
-
-with left:
-    st.markdown("Metric: Time behind leader (minutes)")
-
-    default_selection = ordered_names[:10] if ordered_names else []
-    selected = st.multiselect(
-        "Athletes (ordered by current position)",
-        options=ordered_names,
-        default=default_selection,
-        placeholder="Select athletes..."
-    )
-
-    split_start = st.selectbox("From split", options=splits_order, index=0)
-    split_end = st.selectbox("To split", options=splits_order, index=len(splits_order) - 1)
-
-if not selected:
-    st.info("Select at least one athlete to display the chart.")
-    st.stop()
-
-def idx(s):
-    try:
-        return splits_order.index(s)
-    except ValueError:
-        return 0
-
-i0, i1 = idx(split_start), idx(split_end)
-if i0 > i1:
-    i0, i1 = i1, i0
-range_splits = splits_order[i0:i1+1]
 
 # ======================================
 # 2.5) Summary Table (Top 10 on filtered test data)
