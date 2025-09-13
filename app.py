@@ -190,45 +190,11 @@ if test_mode:
     st.caption(f"Test mode active: {len(df):,} rows (from {before_rows:,}) with athlete elapsed < {max_hours:.1f}h")
 
 
+# =# ======================================
+# 2.5) Race snapshot (Top 10)
 # ======================================
-# 2.5) Summary Table (Top 10 on current dataset)
-# ======================================
-leaders_now = (
-    df.dropna(subset=["net_td"])
-      .sort_values(["split", "net_td"])
-      .groupby("split", as_index=False)
-      .agg(leader_td=("net_td", "min"))
-)
+import re
 
-df_now = df.merge(leaders_now, on="split", how="left").dropna(subset=["net_td", "leader_td"])
-
-st.subheader("Race snapshot (Top 10)")
-if df_now.empty:
-    st.info("No data available for the current dataset.")
-else:
-    latest_now = (
-        df_now.sort_values(["name", "net_td"])
-              .groupby("name", as_index=False)
-              .tail(1)
-              .reset_index(drop=True)
-    )
-    latest_now["gap_min"] = (latest_now["net_td"] - latest_now["leader_td"]).dt.total_seconds() / 60.0
-    latest_now["gap_min"] = latest_now["gap_min"].clip(lower=0)
-    snapshot = latest_now.sort_values(["leader_td", "gap_min"], ascending=[False, True])
-
-    top10 = (
-        snapshot[["name", "split", "gap_min"]]
-        .rename(columns={"name": "Athlete", "split": "Latest split", "gap_min": "Behind (min)"})
-        .copy()
-    )
-    top10["Behind (min)"] = top10["Behind (min)"].map(lambda x: f"{x:.1f}")
-    st.dataframe(top10.head(10).reset_index(drop=True), use_container_width=True, height=320)
-
-# ======================================
-# 2.5) Summary Table (Top 10 on current dataset)
-# ======================================
-
-# Helper to create friendly labels
 def friendly_split_label(split: str) -> str:
     s = str(split).upper()
     if s == "FINISH":
@@ -257,7 +223,7 @@ def friendly_split_label(split: str) -> str:
         return "Bike"
     return s
 
-# Compute leaders and latest per athlete
+# Leaders (computed on current df after any Test mode filtering)
 leaders_now = (
     df.dropna(subset=["net_td"])
       .sort_values(["split", "net_td"])
@@ -279,7 +245,6 @@ else:
     )
     latest_now["gap_min"] = (latest_now["net_td"] - latest_now["leader_td"]).dt.total_seconds() / 60.0
     latest_now["gap_min"] = latest_now["gap_min"].clip(lower=0)
-
     snapshot = latest_now.sort_values(["leader_td", "gap_min"], ascending=[False, True])
 
     top10 = (
@@ -287,18 +252,90 @@ else:
         .rename(columns={"name": "Athlete", "split": "Latest split", "gap_min": "Behind (min)"})
         .copy()
     )
-    # Friendly split labels and formatting
     top10["Latest split"] = top10["Latest split"].map(friendly_split_label)
     top10["Behind (min)"] = top10["Behind (min)"].map(lambda x: f"{x:.1f}")
 
-    # Number from 1 to 10
     top10_out = top10.head(10).reset_index(drop=True)
-    top10_out.index = top10_out.index + 1
+    top10_out.index = top10_out.index + 1  # number from 1..10
     st.dataframe(top10_out, use_container_width=True, height=320)
+# ======================================
+# 3) Plot prep
+# ======================================
+
+# Keep split categorical with master order
+master_order = available_splits_in_order(df)
+try:
+    df["split"] = pd.Categorical(df["split"], categories=master_order, ordered=True)
+except Exception:
+    pass
+
+def split_range(splits, start_key, end_key):
+    if start_key not in splits or end_key not in splits:
+        return splits
+    i0, i1 = splits.index(start_key), splits.index(end_key)
+    if i0 <= i1:
+        return splits[i0:i1+1]
+    else:
+        return splits[i1:i0+1]
+
+range_splits = split_range(master_order, from_split, to_split)
+
+# Align the requested range to the splits that still exist in df
+splits_in_df = set(df["split"].dropna().astype(str).unique().tolist())
+range_splits = [s for s in range_splits if str(s) in splits_in_df]
+if not range_splits:
+    st.info("No splits remaining in the selected range after filtering. Try widening the range or turning Test mode off.")
+    st.stop()
+
+# Selection
+sel = df[(df["name"].isin(selected)) & (df["split"].astype(str).isin(range_splits))].copy()
+if sel.empty:
+    st.info("No rows match the current athlete selection and split range.")
+    st.stop()
+
+# Leaders on the same filtered df scope
+leaders_now = (
+    df.dropna(subset=["net_td"])
+      .sort_values(["split", "net_td"])
+      .groupby("split", as_index=False)
+      .agg(leader_td=("net_td", "min"))
+)
+
+# Merge and compute X/Y
+xy_df = sel.merge(leaders_now, on="split", how="left").dropna(subset=["net_td", "leader_td"])
+xy_df["leader_hr"] = xy_df["leader_td"].dt.total_seconds() / 3600.0
+xy_df["y_gap_min"] = (xy_df["leader_td"] - xy_df["net_td"]).dt.total_seconds() / 60.0
+
+# Friendly labels used in hover
+def friendly_split_label_for_plot(split: str) -> str:
+    return friendly_split_label(split)
+
+# Include START at 0 if in range
+include_start = (len(range_splits) > 0 and str(range_splits[0]).upper() == "START")
+if include_start:
+    start_rows = pd.DataFrame({
+        "name": list(dict.fromkeys(selected)),
+        "split": "START",
+        "leader_td": pd.to_timedelta(0, unit="s"),
+        "net_td": pd.to_timedelta(0, unit="s"),
+        "leader_hr": 0.0,
+        "y_gap_min": 0.0,
+    })
+    xy_df = pd.concat([start_rows, xy_df], ignore_index=True, sort=False)
+
+xy_df["split_label"] = xy_df["split"].astype(str).map(friendly_split_label_for_plot)
+xy_df = xy_df.sort_values(["name", "leader_hr"], kind="mergesort")
+if xy_df.empty:
+    st.info("No rows to plot for the current selection.")
+    st.stop()
+    
 # ======================================
 # 4) Plot
 # ======================================
+import plotly.graph_objects as go
+
 fig = go.Figure()
+
 for nm, g in xy_df.groupby("name", sort=False):
     g = g.sort_values("leader_hr")
     fig.add_trace(go.Scatter(
@@ -310,7 +347,7 @@ for nm, g in xy_df.groupby("name", sort=False):
         showlegend=False,
         hovertemplate="Athlete: %{text}<br>Split: %{meta}<br>Leader elapsed: %{x:.2f} h<br>Behind: %{y:.1f} min",
         text=[nm]*len(g),
-        meta=g["split"],
+        meta=g["split_label"],
     ))
 
 # End labels
@@ -336,16 +373,10 @@ for i, row in last_points.iterrows():
         font=dict(size=12, color="rgba(0,0,0,1)"),
     ))
 
+
 # ======================================
 # 5) Axes and Layout
 # ======================================
-x_min_data = float(xy_df["leader_hr"].min())
-leaders_in_xy = xy_df.groupby("split", as_index=False)["leader_hr"].max()
-x_max_leader = float(leaders_in_xy["leader_hr"].max()) if not leaders_in_xy.empty else float(xy_df["leader_hr"].max())
-x_right_raw = x_max_leader + 0.5  # pad 30 min
-x_left = math.floor(x_min_data / 0.5) * 0.5
-x_right = min(x_right_raw, float(max_hours)) if test_mode else x_right_raw
-
 def fmt_hmm(hours_float: float) -> str:
     total_minutes = int(round(hours_float * 60))
     hh = total_minutes // 60
@@ -361,6 +392,12 @@ def hour_ticks(lo_h: float, hi_h: float, step: float = 0.5) -> list:
         v += step
     return vals
 
+x_min_data = float(xy_df["leader_hr"].min())
+leaders_in_xy = xy_df.groupby("split", as_index=False)["leader_hr"].max()
+x_max_leader = float(leaders_in_xy["leader_hr"].max()) if not leaders_in_xy.empty else float(xy_df["leader_hr"].max())
+x_right_raw = x_max_leader + 0.5
+x_left = math.floor(x_min_data / 0.5) * 0.5
+x_right = min(x_right_raw, float(max_hours)) if test_mode else x_right_raw
 x_ticks_all = hour_ticks(x_left, x_right, step=0.5)
 
 fig.update_xaxes(
@@ -401,5 +438,8 @@ fig.update_layout(
     height=650,
     margin=dict(l=40, r=160, t=30, b=40),
 )
+
+st.plotly_chart(fig, use_container_width=True)
+
 
 st.plotly_chart(fig, use_container_width=True)
