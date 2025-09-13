@@ -9,101 +9,117 @@ import streamlit as st
 st.set_page_config(page_title="Race Gaps vs Leader", layout="wide")
 st.title("Race Gaps vs Leader")
 
+
+You've really messed this up. Go back through the conversation, look at what you'd written previously at that point and use that. I think the following was your section 0 and 1 at that point, but you should be able to reconstruct it better than me
+
+ ======================================
+# 0) Imports, Config, and Constants
 # ======================================
-# 1.0) Load data (from long.csv)
+# /// script
+# dependencies = ["streamlit", "pandas", "plotly-express"]
+# ///
+import os
+import re
+import math
+import pandas as pd
+import streamlit as st
+import plotly.express as px
+
+st.set_page_config(page_title="Ironman Splits Viewer", layout="wide")
+
+# Optional auto-refresh every 60 seconds
+try:
+    from streamlit_autorefresh import st_autorefresh
+    st_autorefresh(interval=60_000, limit=None, key="auto-refresh")
+except Exception:
+    pass
+
+DATA_FILE = "long.csv"
+
+
 # ======================================
-CSV_PATH = Path("long.csv")
+# 1) Data Loading and Utilities
+# ======================================
+@st.cache_data(ttl=60)
+def load_data(path: str) -> pd.DataFrame:
+    if not os.path.exists(path):
+        return pd.DataFrame()
+    df = pd.read_csv(path)
 
-@st.cache_data(show_spinner=True)
-def load_long_csv(p: Path) -> pd.DataFrame:
-    df = pd.read_csv(p)
-    if "name" not in df.columns or "split" not in df.columns or "net_td" not in df.columns:
-        st.error("long.csv must include columns: name, split, net_td")
-        st.stop()
+    # Keep only expected columns if present
+    keep = [c for c in ["name", "split", "netTime"] if c in df.columns]
+    df = df[keep].copy()
 
-    # Normalize net_td to Timedelta
-    try:
-        df["net_td"] = pd.to_timedelta(df["net_td"])
-    except Exception:
-        def to_td(x):
-            try:
-                return pd.to_timedelta(x)
-            except Exception:
-                s = str(x)
-                parts = s.split(":")
-                try:
-                    if len(parts) == 3:
-                        h, m, s = map(int, parts)
-                        return pd.to_timedelta(h, unit="h") + pd.to_timedelta(m, unit="m") + pd.to_timedelta(s, unit="s")
-                    elif len(parts) == 2:
-                        m, s = map(int, parts)
-                        return pd.to_timedelta(m, unit="m") + pd.to_timedelta(s, unit="s")
-                except Exception:
-                    return pd.NaT
-                return pd.NaT
-        df["net_td"] = df["net_td"].apply(to_td)
+    # Parse netTime -> timedelta
+    def parse_td(x):
+        if pd.isna(x):
+            return pd.NaT
+        s = str(x).strip()
+        # Normalize 1:23:45 -> 01:23:45
+        if re.fullmatch(r"\d:\d{2}:\d{2}(\.\d{1,3})?", s):
+            s = "0" + s
+        try:
+            return pd.to_timedelta(s)
+        except Exception:
+            return pd.NaT
 
-    # Basic cleanup
-    df = df.dropna(subset=["name", "split", "net_td"]).copy()
+    df["net_td"] = df["netTime"].apply(parse_td)
 
-    # Order splits by earliest leader time (earliest net_td per split)
-    order = (
-        df.sort_values(["split", "net_td"])
-          .groupby("split", as_index=False)
-          .agg(first_td=("net_td", "min"))
-          .sort_values("first_td")["split"]
-          .tolist()
-    )
-    df["split"] = pd.Categorical(df["split"], categories=order, ordered=True)
-    df = df.sort_values(["split", "name", "net_td"]).reset_index(drop=True)
+    # Normalize text
+    df["name"] = df["name"].astype(str).str.strip()
+    df["split"] = df["split"].astype(str).str.strip().str.upper()
+
     return df
 
-df = load_long_csv(CSV_PATH)
-all_athletes = sorted(df["name"].unique().tolist())
-splits_ordered = list(df["split"].cat.categories)
 
-# ======================================
-# 2.1) UI controls
-# ======================================
-with st.expander("Test mode", expanded=True):
-    test_mode = st.checkbox("Enable test mode (limit dataset by each athlete's elapsed < Max hours)", value=False)
-    max_hours = st.slider("Max hours", 1.0, 12.0, 7.0, 0.5)
+def expected_order():
+    return (
+        ["SWIM", "T1"]
+        + [f"BIKE{i}" for i in range(1, 26)]
+        + ["BIKE", "T2"]
+        + [f"RUN{i}" for i in range(1, 23)]
+        + ["FINISH"]
+    )
 
-colA, colB = st.columns(2)
-with colA:
-    default_selection = all_athletes[:6] if len(all_athletes) >= 6 else all_athletes
-    selected = st.multiselect("Athletes", options=all_athletes, default=default_selection)
-with colB:
-    default_from = 0
-    default_to = len(splits_ordered) - 1 if splits_ordered else 0
-    from_split = st.selectbox("From split", options=splits_ordered, index=default_from if splits_ordered else 0)
-    to_split   = st.selectbox("To split",   options=splits_ordered, index=default_to   if (splits_ordered and default_to >= 0) else 0)
 
-def split_range(splits, start_key, end_key):
-    if start_key not in splits or end_key not in splits:
-        return splits
-    i0, i1 = splits.index(start_key), splits.index(end_key)
-    if i0 <= i1:
-        return splits[i0:i1+1]
-    else:
-        return splits[i1:i0+1]
+def available_splits_in_order(df: pd.DataFrame):
+    order = expected_order()
+    present = [s for s in order if s in df["split"].unique()]
+    if present:
+        return present
+    return sorted(df["split"].dropna().unique().tolist())
 
-range_splits = split_range(splits_ordered, from_split, to_split)
 
-# ======================================
-# 2.2) Apply test filter (per-athlete)
-# ======================================
-if test_mode:
-    max_td = pd.to_timedelta(max_hours, unit="h")
-    before = len(df)
-    df = df.dropna(subset=["net_td"]).copy()
-    df = df[df["net_td"] < max_td].copy()
-    st.caption(f"Test mode active: {len(df):,} rows (from {before:,}) with athlete elapsed < {max_hours:.1f}h")
+def compute_leaders(df: pd.DataFrame) -> pd.DataFrame:
+    d = df.dropna(subset=["net_td"]).copy()
+    leaders = d.groupby("split", as_index=False)["net_td"].min().rename(columns={"net_td": "leader_td"})
+    return leaders
 
-if df.empty or len(selected) == 0 or len(range_splits) == 0:
-    st.info("Please ensure there is data, select at least one athlete, and choose a valid split range.")
-    st.stop()
 
+def latest_common_split(df: pd.DataFrame) -> str | None:
+    if df.empty:
+        return None
+    order = available_splits_in_order(df)
+    for s in reversed(order):
+        if df.loc[(df["split"] == s) & (~df["net_td"].isna())].shape[0] > 0:
+            return s
+    return None
+
+
+def compute_positions(df: pd.DataFrame) -> pd.DataFrame:
+    d = df.dropna(subset=["net_td"]).copy()
+    d["pos"] = d.groupby("split")["net_td"].rank(method="first")
+    return d
+
+
+def minute_ticks(series: pd.Series, min_step: int = 1):
+    if series.empty:
+        return []
+    lo, hi = float(series.min()), float(series.max())
+    start = math.floor(lo)
+    end = math.ceil(hi)
+    step = max(1, min_step)
+    return list(range(start, end + 1, step))
 # ======================================
 # 2.5) Summary Table (Top 10 on current dataset)
 # ======================================
