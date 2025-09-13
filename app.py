@@ -265,7 +265,7 @@ if "BIKE" in leaders["split"].values:
 # ======================================
 # 5) Axes and Layout
 # ======================================
-# X ticks in hours but display as h:mm. Begin at 0 and extend for labels.
+# X ticks in hours but display as h:mm. Begin at 0 and extend +30 minutes past max.
 def hour_ticks(series, step=0.5):
     if series.empty:
         return []
@@ -281,7 +281,8 @@ def hour_ticks(series, step=0.5):
 x_ticks_all = hour_ticks(xy_df["leader_hr"], step=0.5)
 
 x_max = float(xy_df["leader_hr"].max())
-x_right = x_max + 0.20  # ~12 minutes padding for labels
+extra_padding_hours = 0.5  # <-- add 30 minutes beyond last data point
+x_right = x_max + extra_padding_hours
 
 def fmt_hmm(h):
     total_minutes = int(round(h * 60))
@@ -321,15 +322,23 @@ fig.update_yaxes(
     zerolinecolor="#bbb",
 )
 
-# Reference lines drop to the minimum Y tick (axis floor), no labels
+# Vertical reference lines down to the minimum Y tick (axis floor), no labels
 axis_floor = y_start
 ref_shapes = []
-if swim_x is not None:
-    ref_shapes.append(dict(type="line", x0=swim_x, x1=swim_x, y0=0, y1=axis_floor,
-                           line=dict(color="#888", width=1, dash="dot")))
-if bike_x is not None:
-    ref_shapes.append(dict(type="line", x0=bike_x, x1=bike_x, y0=0, y1=axis_floor,
-                           line=dict(color="#888", width=1, dash="dot")))
+if "SWIM" in leaders["split"].values:
+    swim_td = leaders.loc[leaders["split"] == "SWIM", "leader_td"].min()
+    if pd.notna(swim_td):
+        ref_shapes.append(dict(type="line", x0=swim_td.total_seconds()/3600.0,
+                               x1=swim_td.total_seconds()/3600.0,
+                               y0=0, y1=axis_floor,
+                               line=dict(color="#888", width=1, dash="dot")))
+if "BIKE" in leaders["split"].values:
+    bike_td = leaders.loc[leaders["split"] == "BIKE", "leader_td"].min()
+    if pd.notna(bike_td):
+        ref_shapes.append(dict(type="line", x0=bike_td.total_seconds()/3600.0,
+                               x1=bike_td.total_seconds()/3600.0,
+                               y0=0, y1=axis_floor,
+                               line=dict(color="#888", width=1, dash="dot")))
 
 fig.update_layout(
     xaxis=dict(
@@ -344,7 +353,6 @@ fig.update_layout(
         zerolinecolor="#bbb",
     ),
     shapes=ref_shapes,
-    annotations=end_annotations,  # add our label annotations here
     showlegend=False,
     height=650,
     margin=dict(l=40, r=160, t=30, b=40),
