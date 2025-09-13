@@ -317,8 +317,10 @@ if "BIKE" in leaders["split"].values:
 # ======================================
 # 5) Axes and Layout
 # ======================================
-# X ticks in hours but display as h:mm. Start at the beginning of the selected range,
-# snapped back to the previous 30-minute mark, and extend +30 minutes past the max.
+# Axis starts at the first visible data point (snapped back to previous 30-min),
+# and ends at min(7.0h, last leader time + 0.5h padding) so we don't imply
+# everyone reaches 7h if the leader hasn't either.
+
 def hour_ticks(lo_h, hi_h, step=0.5):
     start = math.floor(lo_h / step) * step
     end = math.ceil(hi_h / step) * step
@@ -328,20 +330,24 @@ def hour_ticks(lo_h, hi_h, step=0.5):
         v += step
     return vals
 
-# Determine visible X min from data in the selected range
 if xy_df.empty:
-    st.info("No rows to plot for the current selection. Try selecting more athletes or splits.")
+    st.info("No rows to plot for the current selection.")
     st.stop()
 
+# Compute left bound from visible data
 x_min_data = float(xy_df["leader_hr"].min())
-x_max_data = float(xy_df["leader_hr"].max())
 
-# Snap start to previous 30-minute point relative to the first visible data point
+# Compute right bound:
+# - Find the leader's latest time present in the plotting data (xy_df already ≤ 7h)
+leaders_in_xy = xy_df.groupby("split", as_index=False)["leader_hr"].max()
+x_max_leader = float(leaders_in_xy["leader_hr"].max()) if not leaders_in_xy.empty else float(xy_df["leader_hr"].max())
+# - Add 0.5h for label space but cap at 7.0h (mid-race test cap)
+x_right = min(7.0, x_max_leader + 0.5)
+
+# Snap left bound to previous 0.5h tick
 x_left = math.floor(x_min_data / 0.5) * 0.5
-# Always provide 30 minutes of padding at the right for labels
-x_right = x_max_data + 0.5
 
-# Build tick values at 30-minute spacing across the snapped domain
+# Build ticks
 x_ticks_all = hour_ticks(x_left, x_right, step=0.5)
 
 def fmt_hmm(h):
@@ -389,14 +395,16 @@ if "SWIM" in leaders["split"].values:
     swim_td = leaders.loc[leaders["split"] == "SWIM", "leader_td"].min()
     if pd.notna(swim_td):
         swim_x = swim_td.total_seconds() / 3600.0
-        ref_shapes.append(dict(type="line", x0=swim_x, x1=swim_x, y0=0, y1=axis_floor,
-                               line=dict(color="#888", width=1, dash="dot")))
+        if x_left <= swim_x <= x_right:
+            ref_shapes.append(dict(type="line", x0=swim_x, x1=swim_x, y0=0, y1=axis_floor,
+                                   line=dict(color="#888", width=1, dash="dot")))
 if "BIKE" in leaders["split"].values:
     bike_td = leaders.loc[leaders["split"] == "BIKE", "leader_td"].min()
     if pd.notna(bike_td):
         bike_x = bike_td.total_seconds() / 3600.0
-        ref_shapes.append(dict(type="line", x0=bike_x, x1=bike_x, y0=0, y1=axis_floor,
-                               line=dict(color="#888", width=1, dash="dot")))
+        if x_left <= bike_x <= x_right:
+            ref_shapes.append(dict(type="line", x0=bike_x, x1=bike_x, y0=0, y1=axis_floor,
+                                   line=dict(color="#888", width=1, dash="dot")))
 
 fig.update_layout(
     xaxis=dict(
@@ -411,8 +419,7 @@ fig.update_layout(
         zerolinecolor="#bbb",
     ),
     shapes=ref_shapes,
-    # keep your annotation labels and legend setting from earlier:
-    annotations=end_annotations,
+    annotations=end_annotations,   # from Section 4
     showlegend=False,
     height=650,
     margin=dict(l=40, r=160, t=30, b=40),
