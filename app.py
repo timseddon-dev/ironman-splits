@@ -165,6 +165,50 @@ if i0 > i1:
     i0, i1 = i1, i0
 range_splits = splits_order[i0:i1+1]
 
+# ======================================
+# 2.5) Summary Table (Top 10 at ≤ 7h)
+# ======================================
+# We'll derive the snapshot from the same ≤ 7h state as the plot.
+
+# 1) Build a ≤ 7h subset with leader times joined (like in plotting)
+leaders_full = compute_leaders(df)
+df_7h = (
+    df.merge(leaders_full[["split", "leader_td"]], on="split", how="left")
+      .dropna(subset=["net_td", "leader_td"])
+      .assign(leader_hr=lambda d: d["leader_td"].dt.total_seconds() / 3600.0)
+)
+df_7h = df_7h[df_7h["leader_hr"] <= 7.0].copy()
+
+if df_7h.empty:
+    st.subheader("Race snapshot (Top 10 at ≤ 7h)")
+    st.info("No data available within the first 7 hours yet.")
+else:
+    # 2) For each athlete, take their latest available row within ≤ 7h
+    latest_7h = (
+        df_7h.sort_values(["name", "leader_td"])
+             .groupby("name", as_index=False)
+             .tail(1)
+             .reset_index(drop=True)
+    )
+
+    # 3) Compute time behind the leader at that split (non-negative display)
+    latest_7h["gap_min"] = (latest_7h["net_td"] - latest_7h["leader_td"]).dt.total_seconds() / 60.0
+    latest_7h["gap_min"] = latest_7h["gap_min"].clip(lower=0)
+
+    # 4) Order primarily by advancement (larger leader_td means later in race), then by smallest gap
+    snapshot = latest_7h.sort_values(["leader_td", "gap_min"], ascending=[False, True])
+
+    # 5) Keep essentials and format
+    top10 = (
+        snapshot[["name", "split", "gap_min"]]
+        .rename(columns={"name": "Athlete", "split": "Latest split", "gap_min": "Behind (min)"})
+        .head(10)
+        .copy()
+    )
+    top10["Behind (min)"] = top10["Behind (min)"].map(lambda x: f"{x:.1f}")
+
+    st.subheader("Race snapshot (Top 10 at ≤ 7h)")
+    st.dataframe(top10.reset_index(drop=True), use_container_width=True, height=320)
 
 # ======================================
 # 3) Data Prep For Plot
@@ -181,10 +225,12 @@ xy_df["leader_hr"] = xy_df["leader_td"].dt.total_seconds() / 3600.0
 # Y: leader - athlete in minutes (leader = 0; others negative)
 xy_df["y_gap_min"] = (xy_df["leader_td"] - xy_df["net_td"]).dt.total_seconds() / 60.0
 
+# Limit to mid‑race subset: up to 7.0 hours (for stress testing)
+xy_df = xy_df[xy_df["leader_hr"] <= 7.0].copy()
+
 # Inject synthetic START points (elapsed=0, gap=0) but include them ONLY
 # when the chosen range explicitly starts at START.
 include_start = (len(range_splits) > 0 and str(range_splits[0]).upper() == "START")
-
 if include_start:
     start_rows = pd.DataFrame({
         "name": list(dict.fromkeys(selected)),  # preserve selection order, unique
@@ -194,14 +240,14 @@ if include_start:
         "leader_hr": 0.0,
         "y_gap_min": 0.0,
     })
+    # If we're subsetting to ≤7h, START is fine (0 ≤ 7)
     xy_df = pd.concat([start_rows, xy_df], ignore_index=True, sort=False)
 
 # Sort for consistent line drawing
 xy_df = xy_df.sort_values(["name", "leader_hr"], kind="mergesort")
 
 if xy_df.empty:
-    st.info("No rows to plot for the current selection. Try selecting more athletes or splits.")
-    st.stop()
+    st.info("No rows to plot for the current selection (≤ 7h). Try selecting more athletes or a different split range.")
     st.stop()
 
 # ======================================
