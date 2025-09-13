@@ -34,9 +34,8 @@ except Exception:
 
 DATA_FILE = "long.csv"
 
-
 # ======================================
-# 1) Data Loading and Utilities
+# 1) Data Loading and Utilities — FIXED to always produce net_td
 # ======================================
 @st.cache_data(ttl=60)
 def load_data(path: str) -> pd.DataFrame:
@@ -44,30 +43,58 @@ def load_data(path: str) -> pd.DataFrame:
         return pd.DataFrame()
     df = pd.read_csv(path)
 
-    # Keep only expected columns if present
-    keep = [c for c in ["name", "split", "netTime"] if c in df.columns]
+    # Normalize column names (trim/lower for safety), but keep originals to reference
+    cols_lower = {c: c.strip() for c in df.columns}
+    df.rename(columns=cols_lower, inplace=True)
+
+    # Accept either 'netTime' (original) or 'net_td' if already present
+    has_netTime = "netTime" in df.columns
+    has_net_td = "net_td" in df.columns
+
+    # Keep only expected columns that exist
+    keep = [c for c in ["name", "split", "netTime", "net_td"] if c in df.columns]
     df = df[keep].copy()
 
-    # Parse netTime -> timedelta
-    def parse_td(x):
-        if pd.isna(x):
-            return pd.NaT
-        s = str(x).strip()
-        # Normalize 1:23:45 -> 01:23:45
-        if re.fullmatch(r"\d:\d{2}:\d{2}(\.\d{1,3})?", s):
-            s = "0" + s
+    # If net_td is missing but netTime exists, derive it
+    if not has_net_td and has_netTime:
+        def parse_td(x):
+            if pd.isna(x):
+                return pd.NaT
+            s = str(x).strip()
+            # Normalize 1:23:45 -> 01:23:45
+            if re.fullmatch(r"\d:\d{2}:\d{2}(\.\d{1,3})?", s):
+                s = "0" + s
+            try:
+                return pd.to_timedelta(s)
+            except Exception:
+                return pd.NaT
+        df["net_td"] = df["netTime"].apply(parse_td)
+
+    # If both exist but net_td is empty, try to parse again from netTime
+    if "net_td" in df.columns and df["net_td"].isna().all() and "netTime" in df.columns:
         try:
-            return pd.to_timedelta(s)
+            df["net_td"] = pd.to_timedelta(df["netTime"])
         except Exception:
-            return pd.NaT
+            def parse_td2(x):
+                try:
+                    return pd.to_timedelta(str(x).strip())
+                except Exception:
+                    return pd.NaT
+            df["net_td"] = df["netTime"].apply(parse_td2)
 
-    df["net_td"] = df["netTime"].apply(parse_td)
+    # Normalize text columns
+    if "name" in df.columns:
+        df["name"] = df["name"].astype(str).str.strip()
+    if "split" in df.columns:
+        df["split"] = df["split"].astype(str).str.strip().str.upper()
 
-    # Normalize text
-    df["name"] = df["name"].astype(str).str.strip()
-    df["split"] = df["split"].astype(str).str.strip().str.upper()
+    # Final minimal columns check
+    if "name" not in df.columns or "split" not in df.columns or "net_td" not in df.columns:
+        # Give a precise message with available columns
+        st.error(f"long.csv must include name/split plus either netTime (so we can derive net_td) or net_td directly. Found columns: {list(df.columns)}")
+        return pd.DataFrame()
 
-    return df
+    return df.dropna(subset=["name", "split"]).copy()
 
 
 def expected_order():
@@ -118,6 +145,51 @@ def minute_ticks(series: pd.Series, min_step: int = 1):
     end = math.ceil(hi)
     step = max(1, min_step)
     return list(range(start, end + 1, step))
+
+
+# ======================================
+# 2.0) Load df and prepare options — unchanged
+# ======================================
+df = load_data(DATA_FILE)
+if df.empty:
+    st.error("No usable data found in long.csv. See message above for required columns.")
+    st.stop()
+
+all_athletes = sorted(df["name"].dropna().unique().tolist())
+splits_ordered = available_splits_in_order(df)
+default_selection = all_athletes[:6] if len(all_athletes) >= 6 else all_athletes
+
+
+# ======================================
+# 2.1) UI controls (Test Mode + Max hours) — unchanged
+# ======================================
+with st.expander("Test mode", expanded=True):
+    test_mode = st.checkbox("Enable test mode (limit dataset by athlete elapsed < Max hours)", value=False)
+    max_hours = st.slider("Max hours", 1.0, 12.0, 7.0, 0.5)
+
+colA, colB = st.columns(2)
+with colA:
+    selected = st.multiselect("Athletes (ordered by current position)", options=all_athletes, default=default_selection)
+with colB:
+    from_split = st.selectbox("From split", options=splits_ordered, index=splits_ordered.index("SWIM") if "SWIM" in splits_ordered else 0)
+    to_split = st.selectbox("To split", options=splits_ordered, index=splits_ordered.index("FINISH") if "FINISH" in splits_ordered else len(splits_ordered) - 1)
+
+
+# ======================================
+# 2.2) Apply test filter (per-athlete) — now guarded
+# ======================================
+if test_mode:
+    if "net_td" not in df.columns:
+        st.error("Test filter requires a 'net_td' Timedelta column. Check your long.csv (needs netTime or net_td).")
+        st.stop()
+
+    max_td = pd.to_timedelta(max_hours, unit="h")
+    before_rows = len(df)
+    df = df.dropna(subset=["net_td"]).copy()
+    df = df[df["net_td"] < max_td].copy()
+    st.caption(f"Test mode active: {len(df):,} rows (from {before_rows:,}) with athlete elapsed < {max_hours:.1f}h")
+
+
 # ======================================
 # 2.5) Summary Table (Top 10 on current dataset)
 # ======================================
