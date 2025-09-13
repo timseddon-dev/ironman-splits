@@ -197,9 +197,9 @@ if xy_df.empty:
     st.stop()
 
 # ======================================
-# 4) Plot: Lines + End Labels (as annotations) + Reference Lines
+# 4) Plot: Lines + End Labels (annotations) + Reference Lines
 # ======================================
-# Lines only (no symbols)
+# Lines only (no symbols from the base scatter)
 fig = px.scatter(
     xy_df,
     x="leader_hr",
@@ -221,35 +221,35 @@ for nm, grp in xy_df.groupby("name"):
         showlegend=False,
     )
 
-# End-of-series labels: draw as annotations (left-aligned, pixel offset to the right)
+# Build end-of-series annotations (left-aligned, 8px right shift)
 last_points = (
     xy_df.groupby("name", as_index=False)
          .apply(lambda g: g.sort_values("leader_hr").tail(1))
          .reset_index(drop=True)[["name", "leader_hr", "y_gap_min"]]
 )
 
-# Small vertical staggering (in data units) to reduce overlaps
+# vertical staggering in data units
 stagger = [-0.15, +0.15, -0.25, +0.25, -0.35, +0.35, -0.45, +0.45]
 end_annotations = []
 for i, (_, row) in enumerate(last_points.iterrows()):
     dy = stagger[i % len(stagger)]
     end_annotations.append(dict(
-        x=row["leader_hr"],
-        y=row["y_gap_min"] + dy,
+        x=float(row["leader_hr"]),
+        y=float(row["y_gap_min"] + dy),
         xref="x",
         yref="y",
-        text=row["name"],
+        text=str(row["name"]),
         showarrow=False,
-        xanchor="left",     # left-align the text
+        xanchor="left",
         align="left",
-        xshift=8,           # 8 px to the right
+        xshift=8,   # 8px to the right from the end point
         yshift=0,
-        font=dict(size=12, color=None),  # None -> Plotly will use default (theme)
-        bgcolor="rgba(255,255,255,0.0)", # transparent
+        font=dict(size=12, color="rgba(0,0,0,1)"),
+        bgcolor="rgba(255,255,255,0.0)",
         bordercolor="rgba(0,0,0,0.0)",
     ))
 
-# Vertical dotted reference lines at fastest SWIM and BIKE (no labels)
+# Compute reference line positions (no labels)
 swim_x = None
 bike_x = None
 if "SWIM" in leaders["split"].values:
@@ -261,11 +261,10 @@ if "BIKE" in leaders["split"].values:
     if pd.notna(bike_td):
         bike_x = bike_td.total_seconds() / 3600.0
 
-
 # ======================================
 # 5) Axes and Layout
 # ======================================
-# X ticks in hours but display as h:mm. Begin at 0 and extend +30 minutes past max.
+# X ticks in hours but display as h:mm. Begin at 0 and extend +30 minutes for label space.
 def hour_ticks(series, step=0.5):
     if series.empty:
         return []
@@ -279,10 +278,8 @@ def hour_ticks(series, step=0.5):
     return vals
 
 x_ticks_all = hour_ticks(xy_df["leader_hr"], step=0.5)
-
 x_max = float(xy_df["leader_hr"].max())
-extra_padding_hours = 0.5  # <-- add 30 minutes beyond last data point
-x_right = x_max + extra_padding_hours
+x_right = x_max + 0.5  # 30 min padding
 
 def fmt_hmm(h):
     total_minutes = int(round(h * 60))
@@ -322,24 +319,17 @@ fig.update_yaxes(
     zerolinecolor="#bbb",
 )
 
-# Vertical reference lines down to the minimum Y tick (axis floor), no labels
+# Reference lines down to the axis minimum tick
 axis_floor = y_start
 ref_shapes = []
-if "SWIM" in leaders["split"].values:
-    swim_td = leaders.loc[leaders["split"] == "SWIM", "leader_td"].min()
-    if pd.notna(swim_td):
-        ref_shapes.append(dict(type="line", x0=swim_td.total_seconds()/3600.0,
-                               x1=swim_td.total_seconds()/3600.0,
-                               y0=0, y1=axis_floor,
-                               line=dict(color="#888", width=1, dash="dot")))
-if "BIKE" in leaders["split"].values:
-    bike_td = leaders.loc[leaders["split"] == "BIKE", "leader_td"].min()
-    if pd.notna(bike_td):
-        ref_shapes.append(dict(type="line", x0=bike_td.total_seconds()/3600.0,
-                               x1=bike_td.total_seconds()/3600.0,
-                               y0=0, y1=axis_floor,
-                               line=dict(color="#888", width=1, dash="dot")))
+if swim_x is not None:
+    ref_shapes.append(dict(type="line", x0=swim_x, x1=swim_x, y0=0, y1=axis_floor,
+                           line=dict(color="#888", width=1, dash="dot")))
+if bike_x is not None:
+    ref_shapes.append(dict(type="line", x0=bike_x, x1=bike_x, y0=0, y1=axis_floor,
+                           line=dict(color="#888", width=1, dash="dot")))
 
+# IMPORTANT: attach annotations to layout (this is what was missing if labels vanished)
 fig.update_layout(
     xaxis=dict(
         range=[0.0, x_right],
@@ -353,6 +343,7 @@ fig.update_layout(
         zerolinecolor="#bbb",
     ),
     shapes=ref_shapes,
+    annotations=end_annotations,
     showlegend=False,
     height=650,
     margin=dict(l=40, r=160, t=30, b=40),
