@@ -170,6 +170,8 @@ range_splits = splits_order[i0:i1+1]
 # 3) Data Prep For Plot
 # ======================================
 leaders = compute_leaders(df)
+
+# Restrict to selected athletes and chosen range
 sel = df[df["name"].isin(selected) & df["split"].isin(range_splits)].copy()
 xy_df = sel.merge(leaders, on="split", how="left").dropna(subset=["net_td", "leader_td"])
 
@@ -179,21 +181,27 @@ xy_df["leader_hr"] = xy_df["leader_td"].dt.total_seconds() / 3600.0
 # Y: leader - athlete in minutes (leader = 0; others negative)
 xy_df["y_gap_min"] = (xy_df["leader_td"] - xy_df["net_td"]).dt.total_seconds() / 60.0
 
-# Add (0,0) starting anchor for each selected athlete
-if len(selected):
-    anchors = pd.DataFrame({
-        "name": selected,
+# Inject synthetic START points (elapsed=0, gap=0) but include them ONLY
+# when the chosen range explicitly starts at START.
+include_start = (len(range_splits) > 0 and str(range_splits[0]).upper() == "START")
+
+if include_start:
+    start_rows = pd.DataFrame({
+        "name": list(dict.fromkeys(selected)),  # preserve selection order, unique
+        "split": "START",
+        "leader_td": pd.to_timedelta(0, unit="s"),
+        "net_td": pd.to_timedelta(0, unit="s"),
         "leader_hr": 0.0,
         "y_gap_min": 0.0,
-        "split": "START"
     })
-    xy_df = pd.concat([anchors, xy_df], ignore_index=True, sort=False)
+    xy_df = pd.concat([start_rows, xy_df], ignore_index=True, sort=False)
 
 # Sort for consistent line drawing
-xy_df = xy_df.sort_values(["name", "leader_hr"])
+xy_df = xy_df.sort_values(["name", "leader_hr"], kind="mergesort")
 
 if xy_df.empty:
     st.info("No rows to plot for the current selection. Try selecting more athletes or splits.")
+    st.stop()
     st.stop()
 
 # ======================================
