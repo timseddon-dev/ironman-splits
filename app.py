@@ -1,4 +1,3 @@
-# app.py
 # ======================================
 # Ironman Gaps vs Leader — Full App
 # ======================================
@@ -65,7 +64,8 @@ def load_data(path: str) -> pd.DataFrame:
         except Exception:
             df["net_td"] = df["netTime"].apply(_parse_td)
     else:
-        df["net_td"] = pd.NaT  # downstream will guard if needed
+        # No elapsed column found — keep but some features may not work
+        df["net_td"] = pd.NaT
 
     # Drop rows missing essentials if present
     if "name" in df.columns and "split" in df.columns:
@@ -84,15 +84,13 @@ def expected_order():
 
 
 def available_splits_in_order(_df: pd.DataFrame):
-    if not isinstance(_df, pd.DataFrame) or "split" not in _df.columns:
-        return []
     order = expected_order()
-    present = [s for s in order if s in _df["split"].dropna().unique().tolist()]
+    present = [s for s in order if "split" in _df.columns and s in _df["split"].dropna().unique().tolist()]
     if present:
         return present
     d = _df.dropna(subset=["net_td"]).copy() if "net_td" in _df.columns else _df.copy()
     if d.empty or "net_td" not in d.columns:
-        return sorted(_df["split"].dropna().unique().tolist())
+        return sorted(_df["split"].dropna().unique().tolist()) if "split" in _df.columns else []
     tmp = (
         d.sort_values(["split", "net_td"])
          .groupby("split", as_index=False)
@@ -103,8 +101,6 @@ def available_splits_in_order(_df: pd.DataFrame):
 
 
 def compute_leaders(_df: pd.DataFrame) -> pd.DataFrame:
-    if not isinstance(_df, pd.DataFrame) or "net_td" not in _df.columns:
-        return pd.DataFrame(columns=["split", "leader_td"])
     d = _df.dropna(subset=["net_td"]).copy()
     if d.empty:
         return pd.DataFrame(columns=["split", "leader_td"])
@@ -202,10 +198,9 @@ try:
 except Exception:
     pass
 
-# Split range selectors
+# Split range selectors (From = START by default)
 colA, colB = st.columns([1, 1])
 with colA:
-    # Default to START if present, else first available
     from_idx = splits_ordered_master.index("START") if "START" in splits_ordered_master else 0
     from_split = st.selectbox("From split", options=splits_ordered_master, index=from_idx)
 with colB:
@@ -293,10 +288,10 @@ else:
         .lb-row { padding: 2px 0; border-bottom: 1px solid rgba(0,0,0,0.05); }
         .lb-header { position: sticky; top: 0; background: white; z-index: 2;
                      border-bottom: 1px solid rgba(0,0,0,0.2); padding: 4px 0; }
-        .lb-col-athlete { width: 26ch; }     /* slightly wider than typical longest athlete name */
-        .lb-col-split   { width: 18ch; }     /* enough to include distance */
+        .lb-col-athlete { width: 26ch; }
+        .lb-col-split   { width: 18ch; }
         .lb-col-gap     { width: 10ch; text-align: right; }
-        .lb-col-plot    { width: 10ch; text-align: right; }
+        .lb-col-plot    { width: 11ch; text-align: right; }
         </style>
         """,
         unsafe_allow_html=True,
@@ -397,7 +392,6 @@ if not xy_df.empty:
 xy_df["split_label"] = xy_df["split"].astype(str).map(lambda s: friendly_split_label(s, km_lookup))
 xy_df = xy_df.sort_values(["name", "leader_hr"], kind="mergesort")
 
-import plotly.graph_objects as go
 fig = go.Figure()
 
 # One line per athlete
@@ -449,10 +443,11 @@ x_left = math.floor(x_min_data / 0.5) * 0.5
 x_right = min(x_right_raw, float(max_hours)) if test_mode else x_right_raw
 x_ticks_all = hour_ticks(x_left, x_right, step=0.5)
 
-# Y ticks: from a small positive (near zero) down to min negative, labeled as positive minutes
+# Y ticks: 0 at top, then -2, -4, ... labeled as positive minutes
 y_min_val = float(xy_df["y_gap_min"].min())  # most negative
-y_ticks = [0] + [-(i) for i in range(2, int(abs(y_min_val)) + 1, 2)]  # 0, -2, -4, ...
-y_ticktext = ["0"] + [str(i) for i in range(2, int(abs(y_min_val)) + 1, 2)]
+y_span = max(2, int(abs(y_min_val)))
+y_ticks = [0] + [-(i) for i in range(2, y_span + 1, 2)]
+y_ticktext = ["0"] + [str(i) for i in range(2, y_span + 1, 2)]
 
 fig.update_xaxes(
     title="Leader elapsed (h)",
