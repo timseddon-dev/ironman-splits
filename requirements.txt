@@ -3,3 +3,4 @@ pandas
 plotly
 requests
 openpyxl
+beautifulsoup4==4.12.3
