@@ -1,39 +1,82 @@
-name: Update race data
+# /// script
+# dependencies = ["requests", "pandas"]
+# ///
+import time
+import requests
+import pandas as pd
 
-on:
-  schedule:
-    - cron: "*/5 * * * *"   # every 5 minutes
-  workflow_dispatch:        # allow manual run from the Actions tab
+BASE = "https://api.rtrt.me"
+EVENT = "IRM-WORLDCHAMPIONSHIP-MEN-2025"
+CATEGORY = "pro-men-ironman"
+OUT = "long.csv"
 
-jobs:
-  update:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write   # allow committing back to the repo
-    steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
-        with:
-          persist-credentials: true
+POINTS = (
+    ["SWIM", "T1"]
+    + [f"BIKE{i}" for i in range(1, 26)]
+    + ["BIKE", "T2"]
+    + [f"RUN{i}" for i in range(1, 23)]
+    + ["FINISH"]
+)
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
+HEADERS = {
+    "Accept": "application/json, text/javascript, */*; q=0.01",
+    "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+    "Origin": "https://app.rtrt.me",
+    "Referer": "https://app.rtrt.me/",
+    "User-Agent": "Mozilla/5.0",
+}
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+FORM_BASE = {
+    "timesort": "1",
+    "nohide": "1",
+    "appid": "5824c5c948fd08c23a8b4567",
+    "token": "8DDD292572147587A6E0",
+    "max": "500",
+    "catloc": "1",
+    "cattotal": "1",
+    "units": "standard",
+    "source": "webtracker",
+}
 
-      - name: Fetch latest splits and write long.csv
-        run: |
-          python rtrt_splits.py
+def fetch_point(point: str) -> pd.DataFrame:
+    url = f"{BASE}/events/{EVENT}/categories/{CATEGORY}/splits/{point}"
+    r = requests.post(url, headers=HEADERS, data=FORM_BASE, timeout=30)
+    r.raise_for_status()
+    js = r.json()
+    items = js.get("list") or js.get("items") or []
+    rows = []
+    for it in items:
+        rows.append({
+            "name": str(it.get("name") or "").strip(),
+            "split": (it.get("point") or point),
+            "netTime": it.get("netTime") or it.get("time"),
+        })
+    return pd.DataFrame(rows)
 
-      - name: Commit and push if changed
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add long.csv
-          git diff --cached --quiet || git commit -m "Update long.csv"
-          git push
+def run_once() -> int:
+    frames = []
+    for p in POINTS:
+        try:
+            dfp = fetch_point(p)
+            if not dfp.empty:
+                frames.append(dfp)
+        except requests.RequestException:
+            continue
+        time.sleep(0.15)
+    if not frames:
+        return 0
+    long_df = pd.concat(frames, ignore_index=True)
+    long_df = long_df[["name", "split", "netTime"]].copy()
+    long_df["name"] = long_df["name"].astype(str).str.strip()
+    long_df.to_csv(OUT, index=False, encoding="utf-8")
+    return len(long_df)
+
+if __name__ == "__main__":
+    print("Updater started. Writing long.csv every 3 minutes...")
+    while True:
+        try:
+            n = run_once()
+            print(f"Wrote {n} rows to long.csv")
+        except Exception as e:
+            print(f"Update failed: {e}")
+        time.sleep(180)  # 3 minutes
