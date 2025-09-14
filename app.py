@@ -1,13 +1,3 @@
-import os, re, math, time
-import pandas as pd
-import streamlit as st
-import plotly.graph_objects as go
-import requests
-
-st.set_page_config(page_title="Live Gaps vs Leader", layout="wide", initial_sidebar_state="collapsed")
-
-DATA_FILE = "long.csv"
-
 # =========================
 # 1) Global settings and cache clear
 # =========================
@@ -19,7 +9,7 @@ import requests
 
 st.set_page_config(page_title="Live Gaps vs Leader", layout="wide", initial_sidebar_state="collapsed")
 
-# IMPORTANT: clear any stale cache on startup (safe to keep during live event)
+# Clear caches on each deploy/rerun (safe during live event)
 try:
     st.cache_data.clear()
 except Exception:
@@ -28,10 +18,10 @@ except Exception:
 DATA_FILE = "long.csv"
 
 # =========================
-# 2) In-app updater (every 3 min) with diagnostics
+# 2) In-app updater (every 3 min) with diagnostics and resilient fetch
 # =========================
 BASE = "https://track.rtrt.me"
-EVENT = "IRM-WORLDCHAMPIONSHIP-MEN-2025"  # confirmed by you
+EVENT = "IRM-WORLDCHAMPIONSHIP-MEN-2025"  # confirmed
 CATEGORY = "MPRO"
 
 # Ask for a broad set; API returns only existing points.
@@ -41,6 +31,7 @@ POINTS = (
     [f"RUN{i}" for i in range(1, 28)] + ["RUN", "FINISH"]
 )
 
+UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
 HEADERS = {
     "Accept": "application/json, text/javascript, */*; q=0.01",
     "Accept-Language": "en-GB,en;q=0.9",
@@ -48,54 +39,80 @@ HEADERS = {
     "Origin": "https://track.rtrt.me",
     "Referer": f"https://track.rtrt.me/e/{EVENT}#",
     "X-Requested-With": "XMLHttpRequest",
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+    "User-Agent": UA,
 }
+
+def _normalize_rows(js, point: str) -> pd.DataFrame:
+    rows = (js or {}).get("rows") or []
+    if not rows:
+        return pd.DataFrame(columns=["name", "split", "netTime"])
+    df = pd.DataFrame(rows)
+    if "name" not in df.columns and "athlete" in df.columns:
+        df["name"] = df["athlete"]
+    if "name" not in df.columns:
+        df["name"] = None
+    if "netTime" not in df.columns:
+        if {"hh", "mm", "ss"} <= set(df.columns):
+            df["netTime"] = (
+                df["hh"].astype(int).astype(str) + ":" +
+                df["mm"].astype(int).astype(str).str.zfill(2) + ":" +
+                df["ss"].astype(int).astype(str).str.zfill(2)
+            )
+        else:
+            df["netTime"] = None
+    df["split"] = point
+    return df[["name", "split", "netTime"]]
 
 def _fetch_point_df(point: str) -> pd.DataFrame:
     """
-    Try GET first (most trackers allow GET now). Fall back to POST without categories.
-    Returns DataFrame[name, split, netTime]. Adds cache-buster to avoid CDN.
+    Try multiple endpoint variants with cache-buster and realistic headers.
+    Returns DataFrame[name, split, netTime] or empty DF.
+    Raises last exception only if all variants fail.
     """
     cache_bust = int(time.time())
-    url = f"{BASE}/e/{EVENT}/categories/{CATEGORY}/splits/{point}?t={cache_bust}"
 
-    def normalize(js) -> pd.DataFrame:
-        rows = (js or {}).get("rows") or []
-        if not rows:
-            return pd.DataFrame(columns=["name", "split", "netTime"])
-        df = pd.DataFrame(rows)
-        if "name" not in df.columns and "athlete" in df.columns:
-            df["name"] = df["athlete"]
-        if "name" not in df.columns:
-            df["name"] = None
-        if "netTime" not in df.columns:
-            if {"hh", "mm", "ss"} <= set(df.columns):
-                df["netTime"] = (
-                    df["hh"].astype(int).astype(str) + ":" +
-                    df["mm"].astype(int).astype(str).str.zfill(2) + ":" +
-                    df["ss"].astype(int).astype(str).str.zfill(2)
-                )
-            else:
-                df["netTime"] = None
-        df["split"] = point
-        return df[["name", "split", "netTime"]]
+    # Variant A (original): /e/{EVENT}/categories/{CATEGORY}/splits/{POINT}
+    url_a = f"{BASE}/e/{EVENT}/categories/{CATEGORY}/splits/{point}?t={cache_bust}"
 
-    # Try GET
+    # Variant B (alt form): /e/{EVENT}/splits/{POINT}?category={CATEGORY}
+    url_b = f"{BASE}/e/{EVENT}/splits/{point}?category={CATEGORY}&t={cache_bust}"
+
+    # Some RTRT deployments require POST, others GET. We’ll try both.
+    errors = []
+
+    # A: GET
     try:
-        r = requests.get(url, headers=HEADERS, timeout=20)
+        r = requests.get(url_a, headers=HEADERS, timeout=20)
         r.raise_for_status()
-        return normalize(r.json())
-    except Exception:
-        pass
-
-    # Fallback: POST without categories (some endpoints reject categories form data)
-    try:
-        r = requests.post(url, headers=HEADERS, timeout=20)
-        r.raise_for_status()
-        return normalize(r.json())
+        return _normalize_rows(r.json(), point)
     except Exception as e:
-        # Bubble up so the caller can count/log the error
-        raise e
+        errors.append(("GET A", str(e)))
+
+    # A: POST (without categories body)
+    try:
+        r = requests.post(url_a, headers=HEADERS, timeout=20)
+        r.raise_for_status()
+        return _normalize_rows(r.json(), point)
+    except Exception as e:
+        errors.append(("POST A", str(e)))
+
+    # B: GET
+    try:
+        r = requests.get(url_b, headers=HEADERS, timeout=20)
+        r.raise_for_status()
+        return _normalize_rows(r.json(), point)
+    except Exception as e:
+        errors.append(("GET B", str(e)))
+
+    # B: POST
+    try:
+        r = requests.post(url_b, headers=HEADERS, timeout=20)
+        r.raise_for_status()
+        return _normalize_rows(r.json(), point)
+    except Exception as e:
+        errors.append(("POST B", str(e)))
+        # We gave it four tries; return empty DF but log the last error by raising.
+        raise RuntimeError(f"All variants failed for {point}. Last: {errors[-1][0]} -> {errors[-1][1]}")
 
 @st.cache_data(ttl=180, show_spinner=True)
 def refresh_long_csv() -> dict:
@@ -131,7 +148,8 @@ def refresh_long_csv() -> dict:
         "errors": errors,
         "first_error": first_error,
         "wrote_csv": wrote,
-        "sample_split_url": f"{BASE}/e/{EVENT}/categories/{CATEGORY}/splits/SWIM",
+        "sample_split_url_a": f"{BASE}/e/{EVENT}/categories/{CATEGORY}/splits/SWIM",
+        "sample_split_url_b": f"{BASE}/e/{EVENT}/splits/SWIM?category={CATEGORY}",
     }
 
 # Trigger refresh on run; returns diagnostics for display
@@ -143,7 +161,33 @@ fetch_info = refresh_long_csv()
 st.caption("Live source diagnostics")
 with st.expander("Show fetch details"):
     st.json(fetch_info)
-    st.markdown(f"[Open sample split in a new tab]({fetch_info['sample_split_url']})")
+    st.markdown(f"[Open sample A]({fetch_info['sample_split_url_a']})")
+    st.markdown(f"[Open sample B]({fetch_info['sample_split_url_b']})")
+
+# =========================
+# 4) Course distances and ordering
+# =========================
+KM_MAP = {
+    "SWIM": 3.8,
+    "BIKE1": 9.8, "BIKE2": 26.7, "BIKE3": 40.9, "BIKE4": 46.6, "BIKE5": 53.3,
+    "BIKE6": 60.9, "BIKE7": 67.6, "BIKE8": 81.2, "BIKE9": 88.9, "BIKE10": 94.6,
+    "BIKE11": 100.0, "BIKE12": 110.0, "BIKE13": 120.0, "BIKE14": 129.0,
+    "BIKE15": 136.0, "BIKE16": 143.0, "BIKE17": 151.0, "BIKE18": 160.0,
+    "BIKE19": 168.0, "BIKE20": 170.0,
+    "RUN1": 0.15, "RUN2": 1.1, "RUN3": 2.1, "RUN4": 3.1, "RUN5": 4.1, "RUN6": 5.4,
+    "RUN7": 6.7, "RUN8": 7.7, "RUN9": 8.7, "RUN10": 9.7, "RUN11": 10.6, "RUN12": 11.6,
+    "RUN13": 12.6, "RUN14": 13.6, "RUN15": 14.6, "RUN16": 15.9, "RUN17": 17.2,
+    "RUN18": 18.2, "RUN19": 19.2, "RUN20": 20.2, "RUN21": 21.2, "RUN22": 22.2,
+    "RUN23": 23.2, "RUN24": 24.2, "RUN25": 25.2,
+    "RUN26": 40.2, "RUN27": 41.2,
+}
+
+ORDER = (
+    ["START", "SWIM", "T1"] +
+    [f"BIKE{i}" for i in range(1, 21)] + ["BIKE", "T2"] +
+    [f"RUN{i}" for i in range(1, 28)] + ["RUN", "FINISH"]
+)
+
 # =========================
 # 5) Data loading and helpers
 # =========================
@@ -156,7 +200,7 @@ def load_data(path: str) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame(columns=["name", "split", "netTime"])
 
-    # Normalize
+    # Normalize columns
     if "name" not in df.columns or "split" not in df.columns:
         if "athlete" in df.columns and "split" in df.columns:
             df["name"] = df["athlete"]
@@ -166,7 +210,7 @@ def load_data(path: str) -> pd.DataFrame:
     df["name"] = df["name"].astype(str).str.strip()
     df["split"] = df["split"].astype(str).str.strip().str.upper()
 
-    # Parse elapsed net time to timedelta
+    # Parse elapsed net time -> timedelta
     def parse_td(s):
         if pd.isna(s):
             return pd.NaT
@@ -189,7 +233,7 @@ def load_data(path: str) -> pd.DataFrame:
     )
     df = pd.concat([starts, df[["name", "split", "net_td"]]], ignore_index=True)
 
-    # Order splits by our ORDER but only keep those present
+    # Order splits by ORDER but keep only those present
     have = df["split"].dropna().unique().tolist()
     ordered = [s for s in ORDER if s in have]
     df["split"] = pd.Categorical(df["split"], categories=ordered, ordered=True)
@@ -223,6 +267,7 @@ def split_range(splits, a, b):
     i0, i1 = splits.index(a), splits.index(b)
     if i0 <= i1: return splits[i0:i1+1]
     return splits[i1:i0+1]
+
 # =========================
 # 6) App UI, leaderboard and plot
 # =========================
