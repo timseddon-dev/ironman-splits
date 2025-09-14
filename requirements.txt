@@ -1,6 +1,6 @@
-streamlit
-pandas
-plotly
-requests
-openpyxl
+streamlit==1.37.1
+pandas==2.2.2
+plotly==5.22.0
+requests==2.32.3
+openpyxl==3.1.5
 beautifulsoup4==4.12.3
