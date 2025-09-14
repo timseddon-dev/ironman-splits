@@ -18,50 +18,46 @@ except Exception:
 DATA_FILE = "long.csv"
 
 # =========================
-# 2) In-app updater (session bootstrap + JSON fetch)
+# 2) In-app updater (HTML scraping; no JSON endpoints)
 # =========================
 import requests
+from bs4 import BeautifulSoup
 
 BASE = "https://track.rtrt.me"
 EVENT = "IRM-WORLDCHAMPIONSHIP-MEN-2025"  # confirmed
-CATEGORY = "MPRO"
-
+CATEGORY = "pro-men-ironman"  # matches your UI route segment
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+
 HEADERS_HTML = {
     "User-Agent": UA,
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-GB,en;q=0.9",
     "Referer": f"{BASE}/e/{EVENT}#",
 }
-HEADERS_JSON = {
-    "Accept": "application/json, text/javascript, */*; q=0.01",
-    "Accept-Language": "en-GB,en;q=0.9",
-    "Origin": "https://track.rtrt.me",
-    "Referer": f"{BASE}/e/{EVENT}#",
-    "X-Requested-With": "XMLHttpRequest",
-    "User-Agent": UA,
-}
 
-def _discover_splits(session: requests.Session) -> list[str]:
+def _discover_splits_html() -> list[str]:
     """
-    Loads the event page using the same session (to get cookies),
-    then scrapes split IDs from the HTML.
+    Load the event page and scrape split IDs from link anchors and inline JS.
+    Also expands run splits (RUN1..RUN60) as the UI indicates many (RUN37 etc.).
     """
     import re
     url = f"{BASE}/e/{EVENT}"
-    r = session.get(url, headers=HEADERS_HTML, timeout=20)
+    r = requests.get(url, headers=HEADERS_HTML, timeout=25)
     r.raise_for_status()
     html = r.text
 
+    # Conservative discovery from page text
     tokens = set(re.findall(r'\b(RUN\d+|BIKE\d+|SWIM|START|FINISH|T1|T2|RUN|BIKE)\b', html, flags=re.I))
-    tokens = [t.upper() for t in tokens]
-    tokens = list(dict.fromkeys(tokens))  # de-dup preserving order
+    tokens = {t.upper() for t in tokens}
 
-    # Heuristic ordering: start/t1, bikes, t2, runs, finish
+    # Ensure we include a broad run range in case the page doesn’t list all
+    for i in range(1, 61):
+        tokens.add(f"RUN{i}")
+
+    # Order them in triathlon sequence
     ordered = []
     for k in ["START", "SWIM", "T1"]:
-        if k in tokens:
-            ordered.append(k)
+        if k in tokens: ordered.append(k)
     bikes = sorted([t for t in tokens if t.startswith("BIKE") and t[4:].isdigit()], key=lambda x: int(x[4:]))
     ordered += bikes
     if "BIKE" in tokens: ordered.append("BIKE")
@@ -70,99 +66,127 @@ def _discover_splits(session: requests.Session) -> list[str]:
     ordered += runs
     if "RUN" in tokens: ordered.append("RUN")
     if "FINISH" in tokens: ordered.append("FINISH")
+    # De-dup while preserving order
+    seen, final = set(), []
+    for x in ordered:
+        if x not in seen:
+            final.append(x); seen.add(x)
+    return final
 
-    # Fallback if nothing discovered
-    if not ordered:
-        ordered = ["START","SWIM","T1"] + [f"BIKE{i}" for i in range(1, 21)] + ["BIKE","T2"] + [f"RUN{i}" for i in range(1, 50)] + ["RUN","FINISH"]
+def _split_url_html(split: str) -> str:
+    # Matches your example: #/leaderboard/pro-men-ironman/RUN37
+    return f"{BASE}/e/{EVENT}#/leaderboard/{CATEGORY}/{split}"
 
-    # Keep first 80 to be safe
-    return ordered[:80]
-
-def _normalize_rows(js, point: str) -> pd.DataFrame:
-    rows = (js or {}).get("rows") or []
-    if not rows:
-        return pd.DataFrame(columns=["name", "split", "netTime"])
-    df = pd.DataFrame(rows)
-    if "name" not in df.columns and "athlete" in df.columns:
-        df["name"] = df["athlete"]
-    if "name" not in df.columns:
-        df["name"] = None
-    if "netTime" not in df.columns:
-        if {"hh","mm","ss"} <= set(df.columns):
-            df["netTime"] = (
-                df["hh"].astype(int).astype(str) + ":" +
-                df["mm"].astype(int).astype(str).str.zfill(2) + ":" +
-                df["ss"].astype(int).astype(str).str.zfill(2)
-            )
-        else:
-            df["netTime"] = None
-    df["split"] = point
-    return df[["name","split","netTime"]]
-
-def _fetch_point_df(session: requests.Session, point: str) -> pd.DataFrame:
+def _fetch_split_html(split: str) -> list[dict]:
     """
-    Use same session (with cookies) to call table API, then legacy fallbacks.
+    Downloads the split page and parses the leaderboard table to extract rows.
+    Returns a list of dicts: {"name": ..., "split": split, "netTime": ...}
+    Parsing is robust to minor DOM variations; if no table is found, returns [].
     """
-    cache_bust = int(time.time())
-    url_api = f"{BASE}/api/table?event={EVENT}&category={CATEGORY}&split={point}&t={cache_bust}"
-    url_a = f"{BASE}/e/{EVENT}/categories/{CATEGORY}/splits/{point}?t={cache_bust}"
-    url_b = f"{BASE}/e/{EVENT}/splits/{point}?category={CATEGORY}&t={cache_bust}"
-
-    # Table API
-    r = session.get(url_api, headers=HEADERS_JSON, timeout=20)
-    if r.status_code == 200:
+    # Note: Since this is a hash-route SPA, the server returns base HTML and JS;
+    # we also try the non-hash path the app often preloads for SEO snapshots:
+    # /e/{EVENT}/leaderboard/{CATEGORY}/{split}
+    urls = [
+        _split_url_html(split),
+        f"{BASE}/e/{EVENT}/leaderboard/{CATEGORY}/{split}",
+    ]
+    for url in urls:
         try:
-            return _normalize_rows(r.json(), point)
-        except Exception:
-            pass
+            r = requests.get(url, headers=HEADERS_HTML, timeout=25)
+            if r.status_code != 200 or not r.text:
+                continue
+            soup = BeautifulSoup(r.text, "html.parser")
 
-    # Legacy GET A
-    r = session.get(url_a, headers=HEADERS_JSON, timeout=20)
-    if r.status_code == 200:
-        try:
-            return _normalize_rows(r.json(), point)
-        except Exception:
-            pass
+            # Try 1: Look for a table with headers including Athlete/Name and Net Time/Time
+            table = None
+            for t in soup.find_all("table"):
+                headers = [th.get_text(strip=True).lower() for th in t.find_all("th")]
+                if headers and any("athlete" in h or "name" in h for h in headers) and any("net" in h or "time" in h for h in headers):
+                    table = t
+                    break
 
-    # Legacy GET B
-    r = session.get(url_b, headers=HEADERS_JSON, timeout=20)
-    if r.status_code == 200:
-        try:
-            return _normalize_rows(r.json(), point)
-        except Exception:
-            pass
+            rows_out = []
+            if table:
+                # find column indices
+                header_cells = [th.get_text(strip=True).lower() for th in table.find_all("th")]
+                try:
+                    name_idx = next(i for i, h in enumerate(header_cells) if ("athlete" in h) or ("name" in h))
+                except StopIteration:
+                    name_idx = 0
+                try:
+                    time_idx = next(i for i, h in enumerate(header_cells) if ("net" in h and "time" in h) or h == "time")
+                except StopIteration:
+                    # Use last column as a fallback
+                    time_idx = max(0, len(header_cells) - 1)
 
-    # Give up for this split
-    return pd.DataFrame(columns=["name","split","netTime"])
+                for tr in table.find_all("tr"):
+                    tds = tr.find_all("td")
+                    if not tds:
+                        continue
+                    name = tds[name_idx].get_text(" ", strip=True) if name_idx < len(tds) else ""
+                    ntime = tds[time_idx].get_text(" ", strip=True) if time_idx < len(tds) else ""
+                    # Skip empty or header-like rows
+                    if not name or name.lower() in ("athlete", "name"):
+                        continue
+                    rows_out.append({"name": name, "split": split, "netTime": ntime})
+
+                if rows_out:
+                    return rows_out
+
+            # Try 2: Check for pre-rendered JSON blob in a script tag (common SSR snapshot)
+            for script in soup.find_all("script"):
+                text = script.get_text(" ", strip=True)
+                if not text:
+                    continue
+                # Look for a rows: [...] pattern
+                if "rows" in text and ("athlete" in text or "netTime" in text):
+                    # Very tolerant JSON-ish extraction
+                    import re, json
+                    m = re.search(r'rows\s*:\s*($$[\s\S]*?$$)', text)
+                    if m:
+                        arr = m.group(1)
+                        # Try to coerce into valid JSON
+                        arr = re.sub(r"(\w+)\s*:", r'"\1":', arr)  # quote keys if bare
+                        arr = arr.replace("'", '"')
+                        try:
+                            data = json.loads(arr)
+                            out = []
+                            for row in data:
+                                name = row.get("name") or row.get("athlete")
+                                net = row.get("netTime")
+                                if name:
+                                    out.append({"name": name, "split": split, "netTime": net})
+                            if out:
+                                return out
+                        except Exception:
+                            pass
+
+            # If neither table nor blob produced rows, continue to next URL
+        except Exception:
+            continue
+
+    return []
 
 @st.cache_data(ttl=180, show_spinner=True)
 def refresh_long_csv() -> dict:
     """
-    Bootstrap a session on the event page to obtain cookies, discover split IDs,
-    fetch JSON for each split with the same session, and write long.csv.
+    Discover splits from event page, scrape each split's leaderboard HTML,
+    and write long.csv locally. No JSON endpoints or cookies required.
     """
-    session = requests.Session()
-    session.headers.update({"User-Agent": UA})
+    discovered = _discover_splits_html()
 
-    # Get initial cookies and discover splits
-    discovered = _discover_splits(session)
-
-    # Fetch split tables
-    frames, fetched, errors = [], 0, 0
-    first_error = None
-    for p in discovered:
-        try:
-            dfp = _fetch_point_df(session, p)
-            if not dfp.empty:
-                frames.append(dfp)
-                fetched += len(dfp)
-            else:
-                errors += 1
-        except Exception as e:
-            errors += 1
-            if first_error is None:
-                first_error = str(e)
-        time.sleep(0.10)
+    frames, fetched, empty_pages = [], 0, 0
+    first_empty = None
+    for sp in discovered:
+        rows = _fetch_split_html(sp)
+        if rows:
+            frames.append(pd.DataFrame(rows))
+            fetched += len(rows)
+        else:
+            empty_pages += 1
+            if first_empty is None:
+                first_empty = sp
+        time.sleep(0.15)  # polite delay
 
     ts = pd.Timestamp.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
     wrote = False
@@ -175,14 +199,12 @@ def refresh_long_csv() -> dict:
         "timestamp_utc": ts,
         "event": EVENT,
         "fetched_rows": fetched,
-        "errors": errors,
-        "first_error": first_error,
+        "empty_pages": empty_pages,
+        "first_empty_split": first_empty,
         "wrote_csv": wrote,
         "discovered_splits": discovered[:80],
-        "sample_table_api": f"{BASE}/api/table?event={EVENT}&category={CATEGORY}&split=SWIM",
-        "app_event_url": f"{BASE}/e/{EVENT}#/leaderboard/{CATEGORY.lower()}-ironman",
-        "cookie_names": list(session.cookies.keys()),
-        "status_note": "Session bootstrapped from event page; all JSON calls reuse same cookies.",
+        "sample_ui_split": _split_url_html("RUN37"),
+        "note": "HTML-only scraper; avoids JSON and cookies. If fetched_rows is 0, the page likely renders data client-side only (no server HTML).",
     }
 
 # Trigger refresh on run; returns diagnostics for display
@@ -194,8 +216,8 @@ fetch_info = refresh_long_csv()
 st.caption("Live source diagnostics")
 with st.expander("Show fetch details"):
     st.json(fetch_info)
-    st.markdown(f"[Open event page]({fetch_info['app_event_url']})")
-    st.markdown(f"[Open sample table API]({fetch_info['sample_table_api']})")
+    st.markdown(f"[Open sample UI split (RUN37)]({fetch_info['sample_ui_split']})")
+
 
 # =========================
 # 4) Course distances and ordering
