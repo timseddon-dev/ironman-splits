@@ -18,10 +18,12 @@ except Exception:
 DATA_FILE = "long.csv"
 
 # =========================
-# 2) In-app updater (auto-discover split IDs, then fetch via table API)
+# 2) In-app updater (session bootstrap + JSON fetch)
 # =========================
+import requests
+
 BASE = "https://track.rtrt.me"
-EVENT = "IRM-WORLDCHAMPIONSHIP-MEN-2025"  # confirmed by you
+EVENT = "IRM-WORLDCHAMPIONSHIP-MEN-2025"  # confirmed
 CATEGORY = "MPRO"
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
@@ -29,72 +31,52 @@ HEADERS_HTML = {
     "User-Agent": UA,
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-GB,en;q=0.9",
-    "Referer": f"https://track.rtrt.me/e/{EVENT}#",
+    "Referer": f"{BASE}/e/{EVENT}#",
 }
 HEADERS_JSON = {
     "Accept": "application/json, text/javascript, */*; q=0.01",
     "Accept-Language": "en-GB,en;q=0.9",
-    "Content-Type": "application/json; charset=UTF-8",
     "Origin": "https://track.rtrt.me",
-    "Referer": f"https://track.rtrt.me/e/{EVENT}#",
+    "Referer": f"{BASE}/e/{EVENT}#",
     "X-Requested-With": "XMLHttpRequest",
     "User-Agent": UA,
 }
 
-def _discover_splits() -> list[str]:
+def _discover_splits(session: requests.Session) -> list[str]:
     """
-    Fetches the event shell HTML and scrapes split IDs from embedded hyperlinks and script data.
-    Returns a de-duplicated, ordered list like: ["START","SWIM","T1","BIKE1",...,"RUN37",...,"FINISH"].
+    Loads the event page using the same session (to get cookies),
+    then scrapes split IDs from the HTML.
     """
     import re
     url = f"{BASE}/e/{EVENT}"
-    r = requests.get(url, headers=HEADERS_HTML, timeout=20)
+    r = session.get(url, headers=HEADERS_HTML, timeout=20)
     r.raise_for_status()
     html = r.text
 
-    # Collect tokens that look like split IDs
-    # Examples found in URLs or data attributes: RUN37, BIKE12, SWIM, T1, T2, FINISH, START
     tokens = set(re.findall(r'\b(RUN\d+|BIKE\d+|SWIM|START|FINISH|T1|T2|RUN|BIKE)\b', html, flags=re.I))
-    tokens = {t.upper() for t in tokens}
+    tokens = [t.upper() for t in tokens]
+    tokens = list(dict.fromkeys(tokens))  # de-dup preserving order
 
-    # Heuristic ordering:
-    order_keys = []
-    # Always try to place these first in sensible tri order
+    # Heuristic ordering: start/t1, bikes, t2, runs, finish
+    ordered = []
     for k in ["START", "SWIM", "T1"]:
         if k in tokens:
-            order_keys.append(k)
-            tokens.remove(k)
+            ordered.append(k)
+    bikes = sorted([t for t in tokens if t.startswith("BIKE") and t[4:].isdigit()], key=lambda x: int(x[4:]))
+    ordered += bikes
+    if "BIKE" in tokens: ordered.append("BIKE")
+    if "T2" in tokens: ordered.append("T2")
+    runs = sorted([t for t in tokens if t.startswith("RUN") and len(t) > 3 and t[3:].isdigit()], key=lambda x: int(x[3:]))
+    ordered += runs
+    if "RUN" in tokens: ordered.append("RUN")
+    if "FINISH" in tokens: ordered.append("FINISH")
 
-    # Bikes then transition
-    bikes = sorted([t for t in list(tokens) if t.startswith("BIKE") and t[4:].isdigit()], key=lambda x: int(x[4:]))
-    for b in bikes:
-        order_keys.append(b)
-        tokens.discard(b)
-    if "BIKE" in tokens:
-        order_keys.append("BIKE"); tokens.discard("BIKE")
-    if "T2" in tokens:
-        order_keys.append("T2"); tokens.discard("T2")
+    # Fallback if nothing discovered
+    if not ordered:
+        ordered = ["START","SWIM","T1"] + [f"BIKE{i}" for i in range(1, 21)] + ["BIKE","T2"] + [f"RUN{i}" for i in range(1, 50)] + ["RUN","FINISH"]
 
-    # Runs (handles RUN, RUN37-style, etc.)
-    runs = sorted([t for t in list(tokens) if t.startswith("RUN") and len(t) > 3 and t[3:].isdigit()], key=lambda x: int(x[3:]))
-    for rname in runs:
-        order_keys.append(rname)
-        tokens.discard(rname)
-    if "RUN" in tokens:
-        order_keys.append("RUN"); tokens.discard("RUN")
-
-    # Finish at end if present
-    if "FINISH" in tokens:
-        order_keys.append("FINISH"); tokens.discard("FINISH")
-
-    # Append anything leftover (just in case)
-    order_keys.extend(sorted(tokens))
-
-    # Make sure at least something is present; if not, fall back to a broad template
-    if not order_keys:
-        order_keys = ["START","SWIM","T1"] + [f"BIKE{i}" for i in range(1, 21)] + ["BIKE","T2"] + [f"RUN{i}" for i in range(1, 50)] + ["RUN","FINISH"]
-
-    return order_keys
+    # Keep first 80 to be safe
+    return ordered[:80]
 
 def _normalize_rows(js, point: str) -> pd.DataFrame:
     rows = (js or {}).get("rows") or []
@@ -117,58 +99,65 @@ def _normalize_rows(js, point: str) -> pd.DataFrame:
     df["split"] = point
     return df[["name","split","netTime"]]
 
-def _fetch_point_df(point: str) -> pd.DataFrame:
+def _fetch_point_df(session: requests.Session, point: str) -> pd.DataFrame:
     """
-    Primary: /api/table?event=...&category=...&split=POINT
-    Fallbacks: legacy split endpoints.
+    Use same session (with cookies) to call table API, then legacy fallbacks.
     """
     cache_bust = int(time.time())
     url_api = f"{BASE}/api/table?event={EVENT}&category={CATEGORY}&split={point}&t={cache_bust}"
     url_a = f"{BASE}/e/{EVENT}/categories/{CATEGORY}/splits/{point}?t={cache_bust}"
     url_b = f"{BASE}/e/{EVENT}/splits/{point}?category={CATEGORY}&t={cache_bust}"
 
-    # Table API first
-    try:
-        r = requests.get(url_api, headers=HEADERS_JSON, timeout=20)
-        r.raise_for_status()
-        return _normalize_rows(r.json(), point)
-    except Exception:
-        pass
+    # Table API
+    r = session.get(url_api, headers=HEADERS_JSON, timeout=20)
+    if r.status_code == 200:
+        try:
+            return _normalize_rows(r.json(), point)
+        except Exception:
+            pass
 
-    # Legacy A
-    try:
-        r = requests.get(url_a, headers=HEADERS_JSON, timeout=20)
-        r.raise_for_status()
-        return _normalize_rows(r.json(), point)
-    except Exception:
-        pass
+    # Legacy GET A
+    r = session.get(url_a, headers=HEADERS_JSON, timeout=20)
+    if r.status_code == 200:
+        try:
+            return _normalize_rows(r.json(), point)
+        except Exception:
+            pass
 
-    # Legacy B
-    try:
-        r = requests.get(url_b, headers=HEADERS_JSON, timeout=20)
-        r.raise_for_status()
-        return _normalize_rows(r.json(), point)
-    except Exception as e:
-        raise RuntimeError(f"All variants failed for {point}. Last: {str(e)}")
+    # Legacy GET B
+    r = session.get(url_b, headers=HEADERS_JSON, timeout=20)
+    if r.status_code == 200:
+        try:
+            return _normalize_rows(r.json(), point)
+        except Exception:
+            pass
+
+    # Give up for this split
+    return pd.DataFrame(columns=["name","split","netTime"])
 
 @st.cache_data(ttl=180, show_spinner=True)
 def refresh_long_csv() -> dict:
     """
-    Discovers actual split IDs from the event HTML, then fetches tables per split and writes long.csv.
-    Returns diagnostics including discovered splits.
+    Bootstrap a session on the event page to obtain cookies, discover split IDs,
+    fetch JSON for each split with the same session, and write long.csv.
     """
-    # 1) Discover the split IDs the site is using
-    discovered = _discover_splits()
+    session = requests.Session()
+    session.headers.update({"User-Agent": UA})
 
-    # 2) Fetch
+    # Get initial cookies and discover splits
+    discovered = _discover_splits(session)
+
+    # Fetch split tables
     frames, fetched, errors = [], 0, 0
     first_error = None
     for p in discovered:
         try:
-            dfp = _fetch_point_df(p)
+            dfp = _fetch_point_df(session, p)
             if not dfp.empty:
                 frames.append(dfp)
                 fetched += len(dfp)
+            else:
+                errors += 1
         except Exception as e:
             errors += 1
             if first_error is None:
@@ -189,9 +178,11 @@ def refresh_long_csv() -> dict:
         "errors": errors,
         "first_error": first_error,
         "wrote_csv": wrote,
-        "discovered_splits": discovered[:60],  # show first 60 for sanity
+        "discovered_splits": discovered[:80],
         "sample_table_api": f"{BASE}/api/table?event={EVENT}&category={CATEGORY}&split=SWIM",
         "app_event_url": f"{BASE}/e/{EVENT}#/leaderboard/{CATEGORY.lower()}-ironman",
+        "cookie_names": list(session.cookies.keys()),
+        "status_note": "Session bootstrapped from event page; all JSON calls reuse same cookies.",
     }
 
 # Trigger refresh on run; returns diagnostics for display
