@@ -1,212 +1,213 @@
-import os, math, re
+import os, re, math
 import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
 
-st.set_page_config(page_title="Race Gaps vs Leader", layout="wide")
+st.set_page_config(page_title="Live Gaps vs Leader", layout="wide", initial_sidebar_state="collapsed")
+
 DATA_FILE = "long.csv"
+
+# Exact km distances from your screenshots
+KM_MAP = {
+    "SWIM": 3.8,
+    "BIKE1": 9.8, "BIKE2": 26.7, "BIKE3": 40.9, "BIKE4": 46.6, "BIKE5": 53.3,
+    "BIKE6": 60.9, "BIKE7": 67.6, "BIKE8": 81.2, "BIKE9": 88.9, "BIKE10": 94.6,
+    "BIKE11": 100.0, "BIKE12": 110.0, "BIKE13": 120.0, "BIKE14": 129.0,
+    "BIKE15": 136.0, "BIKE16": 143.0, "BIKE17": 151.0, "BIKE18": 160.0,
+    "BIKE19": 168.0, "BIKE20": 170.0,
+    # Run markers from 0.15 km up to 25.2 km you shared; we’ll show friendly labels if present
+    "RUN1": 0.15, "RUN2": 1.1, "RUN3": 2.1, "RUN4": 3.1, "RUN5": 4.1, "RUN6": 5.4,
+    "RUN7": 6.7, "RUN8": 7.7, "RUN9": 8.7, "RUN10": 9.7, "RUN11": 10.6, "RUN12": 11.6,
+    "RUN13": 12.6, "RUN14": 13.6, "RUN15": 14.6, "RUN16": 15.9, "RUN17": 17.2,
+    "RUN18": 18.2, "RUN19": 19.2, "RUN20": 20.2, "RUN21": 21.2, "RUN22": 22.2,
+    "RUN23": 23.2, "RUN24": 24.2, "RUN25": 25.2,
+}
+
+ORDER = (
+    ["START", "SWIM", "T1"] +
+    [f"BIKE{i}" for i in range(1, 21)] + ["BIKE", "T2"] +
+    [f"RUN{i}" for i in range(1, 26)] + ["RUN", "FINISH"]
+)
 
 @st.cache_data(ttl=30, show_spinner=False)
 def load_data(path: str) -> pd.DataFrame:
     if not os.path.exists(path):
         return pd.DataFrame(columns=["name","split","netTime"])
     df = pd.read_csv(path)
-    df["name"] = df["name"].astype(str).str.strip()
+    # normalize
+    df["name"]  = df["name"].astype(str).str.strip()
     df["split"] = df["split"].astype(str).str.strip().str.upper()
 
-    def _parse_td(x):
-        if pd.isna(x): return pd.NaT
-        s = str(x).strip()
-        if re.fullmatch(r"\d:\d{2}:\d{2}(\.\d{1,3})?", s): s = "0" + s
-        if re.fullmatch(r"\d{1,2}:\d{2}", s): s = "0:" + s
+    def parse_td(s):
+        if pd.isna(s): return pd.NaT
+        x = str(s).strip()
+        if re.fullmatch(r"\d:\d{2}:\d{2}(\.\d+)?", x): x = "0" + x
+        if re.fullmatch(r"\d{1,2}:\d{2}", x): x = "0:" + x
         try:
-            return pd.to_timedelta(s)
+            return pd.to_timedelta(x)
         except Exception:
-            try:
-                parts = s.split(":")
-                if len(parts)==2: return pd.to_timedelta(int(parts[0]), unit="m")+pd.to_timedelta(int(parts[1]), unit="s")
-                if len(parts)==1 and parts[0].isdigit(): return pd.to_timedelta(int(parts[0]), unit="s")
-            except Exception:
-                return pd.NaT
             return pd.NaT
 
-    df["net_td"] = df["netTime"].apply(_parse_td)
+    df["net_td"] = df["netTime"].apply(parse_td)
+    # add a zero START row to anchor plotting
+    starts = (df[["name"]].drop_duplicates().assign(split="START", net_td=pd.to_timedelta(0, unit="s")))
+    df = pd.concat([starts, df[["name","split","net_td"]]], ignore_index=True)
+    # order
+    df["split"] = pd.Categorical(df["split"], categories=[s for s in ORDER if s in df["split"].unique()], ordered=True)
+    return df.dropna(subset=["split"])
 
-    # Inject START (0:00) per athlete
-    start_rows = (
-        df.groupby("name", as_index=False)
-          .agg(dummy=("split","first"))
-          .assign(split="START", net_td=pd.to_timedelta(0, unit="s"))
-          .drop(columns=["dummy"])
-    )
-    df = pd.concat([start_rows, df[["name","split","net_td"]]], ignore_index=True, sort=False)
-    return df.dropna(subset=["name","split"])
-
-def expected_order():
-    return (["START","SWIM","T1"]
-            + [f"BIKE{i}" for i in range(1,26)] + ["BIKE","T2"]
-            + [f"RUN{i}" for i in range(1,23)] + ["RUN","FINISH"])
-
-def available_splits_in_order(df):
-    order = expected_order()
-    have = df["split"].dropna().unique().tolist()
-    present = [s for s in order if s in have]
-    return present or sorted(have)
-
-def compute_leaders(df):
-    d = df.dropna(subset=["net_td"]).copy()
-    if d.empty: return pd.DataFrame(columns=["split","leader_td"])
-    return (d.sort_values(["split","net_td"])
-             .groupby("split", as_index=False)
-             .agg(leader_td=("net_td","min")))
-
-def friendly_split_label(s: str, km_map: dict|None=None) -> str:
+def friendly_label(s: str) -> str:
     s = str(s).upper()
-    if s=="START": return "Start"
-    if s=="FINISH": return "Finish"
-    if s in ("T1","T2"): return s
-    if km_map and s in km_map:  # will wire exact distances when you send them
-        if s.startswith("BIKE"): return f"Bike {km_map[s]:.1f} km"
-        if s.startswith("RUN"): return f"Run {km_map[s]:.1f} km"
-        if s=="SWIM": return f"Swim {km_map[s]:.1f} km"
-    if s=="SWIM": return "Swim"
-    if s.startswith("BIKE"): return "Bike"
-    if s.startswith("RUN"): return "Run"
+    if s == "FINISH": return "Finish"
+    if s == "T1" or s == "T2": return s
+    if s == "SWIM": return "Swim 3.8 km"
+    if s.startswith("BIKE"):
+        km = KM_MAP.get(s)
+        return f"Bike {km:.1f} km" if km else "Bike"
+    if s.startswith("RUN"):
+        km = KM_MAP.get(s)
+        return f"Run {km:.1f} km" if km else "Run"
+    if s == "START": return "Start"
     return s
 
-def fmt_hmm(h):
-    total_minutes = int(round(h*60))
-    return f"{total_minutes//60}:{total_minutes%60:02d}"
+def compute_leader(df: pd.DataFrame) -> pd.DataFrame:
+    d = df.dropna(subset=["net_td"]).copy()
+    if d.empty: return pd.DataFrame(columns=["split","leader_td"])
+    return d.sort_values(["split","net_td"]).groupby("split", as_index=False).agg(leader_td=("net_td","min"))
+
+def split_range(splits, a, b):
+    if a not in splits or b not in splits: return splits
+    i0, i1 = splits.index(a), splits.index(b)
+    return splits[min(i0,i1):max(i0,i1)+1]
 
 df = load_data(DATA_FILE)
-if df.empty:
-    st.info("Waiting for long.csv (updater writes every 3 minutes)...")
-    st.stop()
+splits_present = [s for s in ORDER if s in df["split"].cat.categories.tolist()] if not df.empty else ORDER
 
-splits_ordered = available_splits_in_order(df)
-try:
-    df["split"] = pd.Categorical(df["split"], categories=splits_ordered, ordered=True)
-except Exception:
-    pass
+st.title("Live Gaps vs Leader")
 
-# Split selectors (From defaults to START)
-colA, colB = st.columns([1,1])
-with colA:
-    from_idx = splits_ordered.index("START") if "START" in splits_ordered else 0
-    from_split = st.selectbox("From split", splits_ordered, index=from_idx)
-with colB:
-    to_idx = splits_ordered.index("FINISH") if "FINISH" in splits_ordered else len(splits_ordered)-1
-    to_split = st.selectbox("To split", splits_ordered, index=to_idx)
+# Controls
+c1, c2 = st.columns(2)
+with c1:
+    idx_from = splits_present.index("START") if "START" in splits_present else 0
+    from_split = st.selectbox("From split", splits_present, index=idx_from)
+with c2:
+    idx_to = splits_present.index("FINISH") if "FINISH" in splits_present else len(splits_present)-1
+    to_split = st.selectbox("To split", splits_present, index=idx_to)
 
-def split_range(splits, s0, s1):
-    if s0 not in splits or s1 not in splits: return splits
-    i0, i1 = splits.index(s0), splits.index(s1)
-    return splits[i0:i1+1] if i0<=i1 else splits[i1:i0+1]
-
-# Leaderboard
-leaders = compute_leaders(df)
-df_now = df.merge(leaders, on="split", how="left").dropna(subset=["net_td","leader_td"])
+# Leaderboard with forced vertical scrollbar
+leaders = compute_leader(df)
+lf = df.merge(leaders, on="split", how="left").dropna(subset=["net_td","leader_td"])
 st.subheader("Leaderboard")
 
-if df_now.empty:
-    st.info("No data available yet.")
-    selected_for_plot = []
+if lf.empty:
+    st.info("Waiting for live data...")
+    selected = []
 else:
-    latest = (df_now.sort_values(["name","net_td"])
-                    .groupby("name", as_index=False)
-                    .tail(1)
-                    .reset_index(drop=True))
+    latest = (lf.sort_values(["name","net_td"])
+                .groupby("name", as_index=False).tail(1).reset_index(drop=True))
     latest["gap_min"] = (latest["net_td"] - latest["leader_td"]).dt.total_seconds()/60.0
     latest["gap_min"] = latest["gap_min"].clip(lower=0)
-    latest = latest.sort_values(["gap_min","net_td"], ascending=[True,True]).reset_index(drop=True)
-    latest["Latest split"] = latest["split"].map(friendly_split_label)
+    latest = latest.sort_values(["gap_min","net_td"]).reset_index(drop=True)
+    latest["Latest split"] = latest["split"].map(friendly_label)
     latest["Behind (min)"] = latest["gap_min"].map(lambda x: f"{x:.1f}")
-    table = latest.rename(columns={"name":"Athlete"})[["Athlete","Latest split","Behind (min)"]]
 
-    # Force visible vertical scrollbar and tight columns
     st.markdown("""
         <style>
-        .lb-wrap { max-height: 300px; overflow-y: scroll; padding-right: 8px; }
-        .lb-row { padding: 6px 0; border-bottom: 1px solid rgba(0,0,0,0.06); }
-        .lb-col-athlete { width: 16ch; display: inline-block; }
-        .lb-col-split { width: 14ch; display: inline-block; }
-        .lb-col-gap { width: 8ch; display: inline-block; text-align: right; }
+        .lb-wrap { max-height: 360px; overflow-y: scroll; padding-right: 8px; }
+        .lb-wrap::-webkit-scrollbar { width: 10px; }
+        .lb-wrap::-webkit-scrollbar-thumb { background: rgba(0,0,0,0.3); border-radius: 6px; }
+        .lb-row { display: grid; grid-template-columns: 1.6fr 1.2fr 0.6fr 0.5fr; gap: 12px;
+                  padding: 6px 0; border-bottom: 1px solid rgba(0,0,0,0.06); align-items: center; }
+        .lb-head { position: sticky; top: 0; background: white; z-index: 5;
+                   border-bottom: 1px solid rgba(0,0,0,0.2); padding: 6px 0; }
         </style>
     """, unsafe_allow_html=True)
 
+    st.markdown('<div class="lb-row lb-head"><strong>Athlete</strong><strong>Latest split</strong><strong>Behind</strong><strong>Plot</strong></div>', unsafe_allow_html=True)
     st.markdown('<div class="lb-wrap">', unsafe_allow_html=True)
-    st.markdown('<div class="lb-row"><strong class="lb-col-athlete">Athlete</strong><strong class="lb-col-split">Latest split</strong><strong class="lb-col-gap">Behind</strong></div>', unsafe_allow_html=True)
-    for _, r in table.iterrows():
-        st.markdown(f'<div class="lb-row"><span class="lb-col-athlete">{r["Athlete"]}</span><span class="lb-col-split">{r["Latest split"]}</span><span class="lb-col-gap">{r["Behind (min)"]}</span></div>', unsafe_allow_html=True)
-    st.markdown('</div>', unsafe_allow_html=True)
 
-    # Defaults: top 10 checked, leader always on
+    # checkbox state
     if "plot_checks" not in st.session_state:
         st.session_state.plot_checks = {}
-        top10 = set(table.head(10)["Athlete"].tolist())
-        for nm in table["Athlete"]:
-            st.session_state.plot_checks[nm] = (nm in top10)
-    leader_name = table.iloc[0]["Athlete"]
+        top = set(latest.head(10)["name"])
+        for nm in latest["name"]:
+            st.session_state.plot_checks[nm] = nm in top
+    leader_name = latest.iloc[0]["name"]
     st.session_state.plot_checks[leader_name] = True
+
+    for _, r in latest.iterrows():
+        ck_key = f"plot_{r['name']}"
+        checked = st.session_state.plot_checks.get(r["name"], False)
+        cols = st.columns([1.6, 1.2, 0.6, 0.5], gap="small")
+        cols[0].markdown(f"{r['name']}")
+        cols[1].markdown(f"{r['Latest split']}")
+        cols[2].markdown(f"{r['Behind (min)']}")
+        with cols[3]:
+            st.session_state.plot_checks[r["name"]] = st.checkbox("", value=True if r["name"]==leader_name else checked, key=ck_key, disabled=(r["name"]==leader_name))
+    st.markdown('</div>', unsafe_allow_html=True)
 
     c1, c2, c3 = st.columns(3)
     with c1:
         if st.button("Select top 10"):
-            top10 = set(table.head(10)["Athlete"].tolist())
-            for nm in st.session_state.plot_checks:
-                st.session_state.plot_checks[nm] = (nm in top10) or (nm == leader_name)
+            top = set(latest.head(10)["name"])
+            for k in st.session_state.plot_checks:
+                st.session_state.plot_checks[k] = (k in top) or (k == leader_name)
     with c2:
         if st.button("Select none"):
-            for nm in st.session_state.plot_checks:
-                st.session_state.plot_checks[nm] = (nm == leader_name)
+            for k in st.session_state.plot_checks:
+                st.session_state.plot_checks[k] = (k == leader_name)
     with c3:
         if st.button("Select all"):
-            for nm in st.session_state.plot_checks:
-                st.session_state.plot_checks[nm] = True
+            for k in st.session_state.plot_checks:
+                st.session_state.plot_checks[k] = True
 
-    selected_for_plot = [nm for nm, on in st.session_state.plot_checks.items() if on]
+    selected = [nm for nm, on in st.session_state.plot_checks.items() if on]
 
 # Plot
-range_splits = split_range(splits_ordered, from_split, to_split)
-sel = df[(df["name"].isin(selected_for_plot)) & (df["split"].astype(str).isin(range_splits))].copy()
-if sel.empty:
-    st.stop()
+range_splits = split_range(splits_present, from_split, to_split)
+plot_df = df[(df["name"].isin(selected)) & (df["split"].astype(str).isin(range_splits))].copy()
 
-xy = sel.merge(leaders, on="split", how="left").dropna(subset=["net_td","leader_td"])
-xy["leader_hr"] = xy["leader_td"].dt.total_seconds()/3600.0
+if not plot_df.empty:
+    leaders = compute_leader(df)
+    xy = plot_df.merge(leaders, on="split", how="left").dropna(subset=["net_td","leader_td"])
+    xy["leader_hr"] = xy["leader_td"].dt.total_seconds()/3600.0
+    xy["gap_min_pos"] = ((xy["net_td"] - xy["leader_td"]).dt.total_seconds()/60.0).clip(lower=0)
+    xy["split_label"] = xy["split"].map(friendly_label)
 
-# Plot positive minutes and reverse the y-axis so 0 is at the top
-xy["gap_min_pos"] = ((xy["net_td"] - xy["leader_td"]).dt.total_seconds()/60.0).clip(lower=0)
+    fig = go.Figure()
+    for nm, g in xy.groupby("name", sort=False):
+        g = g.sort_values("leader_hr")
+        fig.add_trace(go.Scatter(
+            x=g["leader_hr"], y=g["gap_min_pos"],
+            mode="lines", line=dict(width=1.8),
+            name=nm, showlegend=False,
+            hovertemplate="Athlete: %{text}<br>Split: %{meta}<br>Leader elapsed: %{x:.2f} h<br>Behind: %{y:.1f} min",
+            text=[nm]*len(g), meta=g["split_label"],
+        ))
+    # label at last point
+    ends = (xy.sort_values(["name","leader_hr"]).groupby("name", as_index=False).tail(1))
+    labels = []
+    for _, r in ends.iterrows():
+        labels.append(dict(
+            x=float(r["leader_hr"]), y=float(r["gap_min_pos"]),
+            xref="x", yref="y", text=str(r["name"]), showarrow=False,
+            xanchor="left", yanchor="middle",
+            font=dict(size=11, color="rgba(0,0,0,0.9)"),
+            bgcolor="rgba(255,255,255,0.65)", bordercolor="rgba(0,0,0,0.1)", borderwidth=1,
+        ))
 
-fig = go.Figure()
-for nm, g in xy.groupby("name"):
-    g = g.sort_values("leader_hr")
-    fig.add_trace(go.Scatter(
-        x=g["leader_hr"], y=g["gap_min_pos"], mode="lines",
-        line=dict(width=1.8), name=nm, showlegend=False,
-        hovertemplate="Athlete: %{text}<br>Leader elapsed: %{x:.2f} h<br>Behind: %{y:.1f} min",
-        text=[nm]*len(g),
-    ))
+    # Axes: 0 at top using reversed autorange
+    x_left = math.floor(xy["leader_hr"].min() / 0.5) * 0.5
+    x_right = math.ceil(xy["leader_hr"].max() / 0.5) * 0.5 + 0.25
+    x_ticks = [round(x_left + 0.5*i, 2) for i in range(int((x_right - x_left)/0.5)+1)]
 
-# Labels at last point
-endpoints = (xy.sort_values(["name","leader_hr"]).groupby("name", as_index=False).tail(1))
-labels = []
-for _, row in endpoints.iterrows():
-    labels.append(dict(
-        x=float(row["leader_hr"]), y=float(row["gap_min_pos"]),
-        xref="x", yref="y",
-        text=str(row["name"]), showarrow=False,
-        xanchor="left", yanchor="middle",
-        font=dict(size=11, color="rgba(0,0,0,0.9)"),
-        bgcolor="rgba(255,255,255,0.65)", bordercolor="rgba(0,0,0,0.1)", borderwidth=1, opacity=0.95
-    ))
-
-x_left = math.floor(float(xy["leader_hr"].min())/0.5)*0.5
-x_right = float(xy.groupby("split", as_index=False)["leader_hr"].max()["leader_hr"].max()) + 0.25
-x_ticks = [round(x_left + 0.5*i, 6) for i in range(int((x_right - x_left)/0.5)+1)]
-
-fig.update_xaxes(title="Leader elapsed (h)", tickmode="array", tickvals=x_ticks, ticktext=[fmt_hmm(v) for v in x_ticks], showgrid=True, zeroline=False, showline=True, mirror=True, ticks="outside")
-fig.update_yaxes(title="Time behind leader (min)", autorange="reversed", showgrid=True, zeroline=True, zerolinecolor="rgba(0,0,0,0.25)", showline=True, mirror=True, ticks="outside")
-
-fig.update_layout(height=520, margin=dict(l=50, r=30, t=30, b=40), annotations=labels)
-st.plotly_chart(fig, use_container_width=True)
+    fig.update_xaxes(title="Leader elapsed (h)", tickvals=x_ticks,
+                     ticktext=[f"{int(v)}:{int((v%1)*60):02d}" for v in x_ticks],
+                     showgrid=True, zeroline=False, showline=True, mirror=True, ticks="outside")
+    fig.update_yaxes(title="Time behind leader (min)", autorange="reversed",
+                     showgrid=True, zeroline=True, zerolinecolor="rgba(0,0,0,0.25)",
+                     showline=True, mirror=True, ticks="outside")
+    fig.update_layout(height=520, margin=dict(l=50, r=30, t=30, b=40), annotations=labels)
+    st.plotly_chart(fig, use_container_width=True)
+else:
+    st.info("Select athletes to plot.")
