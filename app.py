@@ -9,13 +9,32 @@ st.set_page_config(page_title="Live Gaps vs Leader", layout="wide", initial_side
 DATA_FILE = "long.csv"
 
 # =========================
-# In-app updater (every 3 min)
+# 1) Global settings and cache clear
+# =========================
+import os, re, math, time
+import pandas as pd
+import streamlit as st
+import plotly.graph_objects as go
+import requests
+
+st.set_page_config(page_title="Live Gaps vs Leader", layout="wide", initial_sidebar_state="collapsed")
+
+# IMPORTANT: clear any stale cache on startup (safe to keep during live event)
+try:
+    st.cache_data.clear()
+except Exception:
+    pass
+
+DATA_FILE = "long.csv"
+
+# =========================
+# 2) In-app updater (every 3 min) with diagnostics
 # =========================
 BASE = "https://track.rtrt.me"
-EVENT = "IRM-WORLDCHAMPIONSHIP-MEN-2025"
+EVENT = "IRM-WORLDCHAMPIONSHIP-MEN-2025"  # confirmed by you
 CATEGORY = "MPRO"
 
-# We ask for a broad set; server returns only what exists.
+# Ask for a broad set; API returns only existing points.
 POINTS = (
     ["START", "SWIM", "T1"] +
     [f"BIKE{i}" for i in range(1, 21)] + ["BIKE", "T2"] +
@@ -31,10 +50,11 @@ HEADERS = {
 
 def _fetch_point_df(point: str) -> pd.DataFrame:
     """
-    Fetch a single split point and return a normalized DataFrame with columns:
-    name, split, netTime
+    Fetch a single split and return DataFrame columns: name, split, netTime.
+    Adds a cache-buster query param to avoid CDN/proxy caching.
     """
-    url = f"{BASE}/e/{EVENT}/categories/{CATEGORY}/splits/{point}"
+    cache_bust = int(time.time())
+    url = f"{BASE}/e/{EVENT}/categories/{CATEGORY}/splits/{point}?t={cache_bust}"
     r = requests.post(url, headers=HEADERS, data={"categories": "4,8,16,32"}, timeout=20)
     r.raise_for_status()
     js = r.json()
@@ -48,11 +68,10 @@ def _fetch_point_df(point: str) -> pd.DataFrame:
         df["name"] = df["athlete"]
     if "name" not in df.columns:
         df["name"] = None
-
     df["split"] = point
 
+    # Normalize netTime
     if "netTime" not in df.columns:
-        # Some payloads provide hh/mm/ss fields
         if {"hh", "mm", "ss"} <= set(df.columns):
             df["netTime"] = (
                 df["hh"].astype(int).astype(str) + ":" +
@@ -64,60 +83,67 @@ def _fetch_point_df(point: str) -> pd.DataFrame:
 
     return df[["name", "split", "netTime"]]
 
-@st.cache_data(ttl=180, show_spinner=False)
-def refresh_long_csv() -> str:
+@st.cache_data(ttl=180, show_spinner=True)
+def refresh_long_csv() -> dict:
     """
-    Fetches all configured POINTS and writes long.csv in the app working dir.
-    The cache ttl=180s makes Streamlit re-run roughly every 3 minutes.
-    Returns the output filename (or empty string if nothing fetched).
+    Pulls all POINTS and writes long.csv. Returns a small diagnostic dict.
+    ttl=180s ensures the app re-runs roughly every 3 minutes while open.
     """
-    frames = []
+    frames, fetched, errors = [], 0, 0
     for p in POINTS:
         try:
             dfp = _fetch_point_df(p)
             if not dfp.empty:
                 frames.append(dfp)
+                fetched += len(dfp)
         except Exception:
-            # Swallow individual point errors to keep updating others
-            pass
-        time.sleep(0.15)  # keep requests polite
+            errors += 1
+        time.sleep(0.12)  # be gentle to API
 
-    if not frames:
-        return ""
+    ts = pd.Timestamp.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    wrote = False
+    if frames:
+        long_df = pd.concat(frames, ignore_index=True)
+        long_df.to_csv(DATA_FILE, index=False, encoding="utf-8")
+        wrote = True
 
-    long_df = pd.concat(frames, ignore_index=True)
-    long_df.to_csv(DATA_FILE, index=False, encoding="utf-8")
-    return DATA_FILE
+    return {
+        "timestamp_utc": ts,
+        "event": EVENT,
+        "fetched_rows": fetched,
+        "errors": errors,
+        "wrote_csv": wrote,
+        "sample_split_url": f"{BASE}/e/{EVENT}/categories/{CATEGORY}/splits/SWIM",
+    }
 
-# Trigger a refresh every ~3 minutes (cache-driven)
-refresh_long_csv()
+# Trigger refresh on run; returns diagnostics for display
+fetch_info = refresh_long_csv()
 
 # =========================
-# Course distances (from your screenshots)
+# 3) Debug panel
+# =========================
+st.caption("Live source diagnostics")
+with st.expander("Show fetch details"):
+    st.write(fetch_info)
+
+# =========================
+# 4) Course distances and ordering
 # =========================
 KM_MAP = {
     "SWIM": 3.8,
-
-    # Bike checkpoints
     "BIKE1": 9.8, "BIKE2": 26.7, "BIKE3": 40.9, "BIKE4": 46.6, "BIKE5": 53.3,
     "BIKE6": 60.9, "BIKE7": 67.6, "BIKE8": 81.2, "BIKE9": 88.9, "BIKE10": 94.6,
     "BIKE11": 100.0, "BIKE12": 110.0, "BIKE13": 120.0, "BIKE14": 129.0,
     "BIKE15": 136.0, "BIKE16": 143.0, "BIKE17": 151.0, "BIKE18": 160.0,
     "BIKE19": 168.0, "BIKE20": 170.0,
-
-    # Run checkpoints (confirmed)
-    "RUN1": 0.15, "RUN2": 1.1,  "RUN3": 2.1,  "RUN4": 3.1,  "RUN5": 4.1,  "RUN6": 5.4,
-    "RUN7": 6.7,  "RUN8": 7.7,  "RUN9": 8.7,  "RUN10": 9.7, "RUN11": 10.6, "RUN12": 11.6,
+    "RUN1": 0.15, "RUN2": 1.1, "RUN3": 2.1, "RUN4": 3.1, "RUN5": 4.1, "RUN6": 5.4,
+    "RUN7": 6.7, "RUN8": 7.7, "RUN9": 8.7, "RUN10": 9.7, "RUN11": 10.6, "RUN12": 11.6,
     "RUN13": 12.6, "RUN14": 13.6, "RUN15": 14.6, "RUN16": 15.9, "RUN17": 17.2,
     "RUN18": 18.2, "RUN19": 19.2, "RUN20": 20.2, "RUN21": 21.2, "RUN22": 22.2,
     "RUN23": 23.2, "RUN24": 24.2, "RUN25": 25.2,
-
-    # Additional estimates you provided
-    "RUN26": 40.2,  # Est. Run 25 mi | 40.2 km
-    "RUN27": 41.2,  # Est. Run 25.6 mi | 41.2 km
+    "RUN26": 40.2, "RUN27": 41.2,
 }
 
-# Display/ordering (filtered to what exists in the CSV)
 ORDER = (
     ["START", "SWIM", "T1"] +
     [f"BIKE{i}" for i in range(1, 21)] + ["BIKE", "T2"] +
@@ -125,7 +151,7 @@ ORDER = (
 )
 
 # =========================
-# Data loading and helpers
+# 5) Data loading and helpers
 # =========================
 @st.cache_data(ttl=30, show_spinner=False)
 def load_data(path: str) -> pd.DataFrame:
@@ -146,7 +172,7 @@ def load_data(path: str) -> pd.DataFrame:
     df["name"] = df["name"].astype(str).str.strip()
     df["split"] = df["split"].astype(str).str.strip().str.upper()
 
-    # Parse elapsed net time
+    # Parse elapsed net time to timedelta
     def parse_td(s):
         if pd.isna(s):
             return pd.NaT
@@ -160,10 +186,7 @@ def load_data(path: str) -> pd.DataFrame:
         except Exception:
             return pd.NaT
 
-    if "netTime" in df.columns:
-        df["net_td"] = df["netTime"].apply(parse_td)
-    else:
-        df["net_td"] = pd.NaT
+    df["net_td"] = df.get("netTime", pd.Series([None]*len(df))).apply(parse_td)
 
     # Add a zero START row per athlete to anchor lines
     starts = (
@@ -180,21 +203,14 @@ def load_data(path: str) -> pd.DataFrame:
 
 def friendly_label(s: str) -> str:
     s = str(s).upper()
-    if s == "START":
-        return "Start"
-    if s == "FINISH":
-        return "Finish"
-    if s in ("T1", "T2"):
-        return s
-    if s == "SWIM":
-        km = KM_MAP.get("SWIM")
-        return f"Swim {km:.1f} km" if km else "Swim"
+    if s == "START": return "Start"
+    if s == "FINISH": return "Finish"
+    if s in ("T1", "T2"): return s
+    if s == "SWIM": return f"Swim {KM_MAP.get('SWIM', 3.8):.1f} km"
     if s.startswith("BIKE"):
-        km = KM_MAP.get(s)
-        return f"Bike {km:.1f} km" if km else "Bike"
+        km = KM_MAP.get(s); return f"Bike {km:.1f} km" if km else "Bike"
     if s.startswith("RUN"):
-        km = KM_MAP.get(s)
-        return f"Run {km:.1f} km" if km else "Run"
+        km = KM_MAP.get(s); return f"Run {km:.1f} km" if km else "Run"
     return s
 
 def compute_leader(df: pd.DataFrame) -> pd.DataFrame:
@@ -211,12 +227,10 @@ def split_range(splits, a, b):
     if a not in splits or b not in splits:
         return splits
     i0, i1 = splits.index(a), splits.index(b)
-    if i0 <= i1:
-        return splits[i0:i1+1]
+    if i0 <= i1: return splits[i0:i1+1]
     return splits[i1:i0+1]
-
 # =========================
-# App
+# 6) App UI, leaderboard and plot
 # =========================
 df = load_data(DATA_FILE)
 splits_present = df["split"].cat.categories.tolist() if not df.empty else ORDER
@@ -255,7 +269,7 @@ else:
     latest["Latest split"] = latest["split"].map(friendly_label)
     latest["Behind (min)"] = latest["gap_min"].map(lambda x: f"{x:.1f}")
 
-    # CSS to guarantee scrollbar and keep columns tight
+    # Guaranteed scrollbar via CSS
     st.markdown("""
         <style>
         .lb-wrap { max-height: 360px; overflow-y: scroll; padding-right: 8px; }
