@@ -1,13 +1,100 @@
-import os, re, math
+import os, re, math, time
 import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
+import requests
 
 st.set_page_config(page_title="Live Gaps vs Leader", layout="wide", initial_sidebar_state="collapsed")
 
 DATA_FILE = "long.csv"
 
-# Distances from your screenshots
+# =========================
+# In-app updater (every 3 min)
+# =========================
+BASE = "https://track.rtrt.me"
+EVENT = "IRM-WORLDCHAMPIONSHIP-MEN-2025"
+CATEGORY = "MPRO"
+
+# We ask for a broad set; server returns only what exists.
+POINTS = (
+    ["START", "SWIM", "T1"] +
+    [f"BIKE{i}" for i in range(1, 21)] + ["BIKE", "T2"] +
+    [f"RUN{i}" for i in range(1, 28)] + ["RUN", "FINISH"]
+)
+
+HEADERS = {
+    "Accept": "application/json, text/javascript, */*; q=0.01",
+    "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+    "Origin": "https://track.rtrt.me",
+    "Referer": "https://track.rtrt.me/",
+}
+
+def _fetch_point_df(point: str) -> pd.DataFrame:
+    """
+    Fetch a single split point and return a normalized DataFrame with columns:
+    name, split, netTime
+    """
+    url = f"{BASE}/e/{EVENT}/categories/{CATEGORY}/splits/{point}"
+    r = requests.post(url, headers=HEADERS, data={"categories": "4,8,16,32"}, timeout=20)
+    r.raise_for_status()
+    js = r.json()
+    rows = js.get("rows") or []
+    if not rows:
+        return pd.DataFrame(columns=["name", "split", "netTime"])
+    df = pd.DataFrame(rows)
+
+    # Normalize columns
+    if "name" not in df.columns and "athlete" in df.columns:
+        df["name"] = df["athlete"]
+    if "name" not in df.columns:
+        df["name"] = None
+
+    df["split"] = point
+
+    if "netTime" not in df.columns:
+        # Some payloads provide hh/mm/ss fields
+        if {"hh", "mm", "ss"} <= set(df.columns):
+            df["netTime"] = (
+                df["hh"].astype(int).astype(str) + ":" +
+                df["mm"].astype(int).astype(str).str.zfill(2) + ":" +
+                df["ss"].astype(int).astype(str).str.zfill(2)
+            )
+        else:
+            df["netTime"] = None
+
+    return df[["name", "split", "netTime"]]
+
+@st.cache_data(ttl=180, show_spinner=False)
+def refresh_long_csv() -> str:
+    """
+    Fetches all configured POINTS and writes long.csv in the app working dir.
+    The cache ttl=180s makes Streamlit re-run roughly every 3 minutes.
+    Returns the output filename (or empty string if nothing fetched).
+    """
+    frames = []
+    for p in POINTS:
+        try:
+            dfp = _fetch_point_df(p)
+            if not dfp.empty:
+                frames.append(dfp)
+        except Exception:
+            # Swallow individual point errors to keep updating others
+            pass
+        time.sleep(0.15)  # keep requests polite
+
+    if not frames:
+        return ""
+
+    long_df = pd.concat(frames, ignore_index=True)
+    long_df.to_csv(DATA_FILE, index=False, encoding="utf-8")
+    return DATA_FILE
+
+# Trigger a refresh every ~3 minutes (cache-driven)
+refresh_long_csv()
+
+# =========================
+# Course distances (from your screenshots)
+# =========================
 KM_MAP = {
     "SWIM": 3.8,
 
@@ -30,13 +117,16 @@ KM_MAP = {
     "RUN27": 41.2,  # Est. Run 25.6 mi | 41.2 km
 }
 
-# Full order we’ll show, filtered to what exists in the CSV
+# Display/ordering (filtered to what exists in the CSV)
 ORDER = (
     ["START", "SWIM", "T1"] +
     [f"BIKE{i}" for i in range(1, 21)] + ["BIKE", "T2"] +
     [f"RUN{i}" for i in range(1, 28)] + ["RUN", "FINISH"]
 )
 
+# =========================
+# Data loading and helpers
+# =========================
 @st.cache_data(ttl=30, show_spinner=False)
 def load_data(path: str) -> pd.DataFrame:
     if not os.path.exists(path):
@@ -48,7 +138,6 @@ def load_data(path: str) -> pd.DataFrame:
 
     # Normalize
     if "name" not in df.columns or "split" not in df.columns:
-        # Keep file tolerant if upstream changes keys
         if "athlete" in df.columns and "split" in df.columns:
             df["name"] = df["athlete"]
         else:
@@ -62,7 +151,6 @@ def load_data(path: str) -> pd.DataFrame:
         if pd.isna(s):
             return pd.NaT
         x = str(s).strip()
-        # Pad times like H:MM:SS and MM:SS into HH:MM:SS
         if re.fullmatch(r"\d:\d{2}:\d{2}(\.\d+)?", x):
             x = "0" + x
         if re.fullmatch(r"\d{1,2}:\d{2}", x):
@@ -127,11 +215,11 @@ def split_range(splits, a, b):
         return splits[i0:i1+1]
     return splits[i1:i0+1]
 
-# Load current data
+# =========================
+# App
+# =========================
 df = load_data(DATA_FILE)
-splits_present = (
-    df["split"].cat.categories.tolist() if not df.empty else ORDER
-)
+splits_present = df["split"].cat.categories.tolist() if not df.empty else ORDER
 
 st.title("Live Gaps vs Leader")
 
@@ -144,7 +232,7 @@ with c2:
     idx_to = splits_present.index("FINISH") if "FINISH" in splits_present else len(splits_present) - 1
     to_split = st.selectbox("To split", splits_present, index=idx_to)
 
-# Leaderboard with forced vertical scrollbar
+# Leaderboard
 leaders = compute_leader(df)
 lf = df.merge(leaders, on="split", how="left").dropna(subset=["net_td", "leader_td"])
 
