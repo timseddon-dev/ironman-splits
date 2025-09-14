@@ -18,29 +18,83 @@ except Exception:
 DATA_FILE = "long.csv"
 
 # =========================
-# 2) In-app updater (every 3 min) with diagnostics and resilient fetch
+# 2) In-app updater (auto-discover split IDs, then fetch via table API)
 # =========================
 BASE = "https://track.rtrt.me"
-EVENT = "IRM-WORLDCHAMPIONSHIP-MEN-2025"  # confirmed
+EVENT = "IRM-WORLDCHAMPIONSHIP-MEN-2025"  # confirmed by you
 CATEGORY = "MPRO"
 
-# Ask for a broad set; API returns only existing points.
-POINTS = (
-    ["START", "SWIM", "T1"] +
-    [f"BIKE{i}" for i in range(1, 21)] + ["BIKE", "T2"] +
-    [f"RUN{i}" for i in range(1, 28)] + ["RUN", "FINISH"]
-)
-
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-HEADERS = {
+HEADERS_HTML = {
+    "User-Agent": UA,
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-GB,en;q=0.9",
+    "Referer": f"https://track.rtrt.me/e/{EVENT}#",
+}
+HEADERS_JSON = {
     "Accept": "application/json, text/javascript, */*; q=0.01",
     "Accept-Language": "en-GB,en;q=0.9",
-    "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+    "Content-Type": "application/json; charset=UTF-8",
     "Origin": "https://track.rtrt.me",
     "Referer": f"https://track.rtrt.me/e/{EVENT}#",
     "X-Requested-With": "XMLHttpRequest",
     "User-Agent": UA,
 }
+
+def _discover_splits() -> list[str]:
+    """
+    Fetches the event shell HTML and scrapes split IDs from embedded hyperlinks and script data.
+    Returns a de-duplicated, ordered list like: ["START","SWIM","T1","BIKE1",...,"RUN37",...,"FINISH"].
+    """
+    import re
+    url = f"{BASE}/e/{EVENT}"
+    r = requests.get(url, headers=HEADERS_HTML, timeout=20)
+    r.raise_for_status()
+    html = r.text
+
+    # Collect tokens that look like split IDs
+    # Examples found in URLs or data attributes: RUN37, BIKE12, SWIM, T1, T2, FINISH, START
+    tokens = set(re.findall(r'\b(RUN\d+|BIKE\d+|SWIM|START|FINISH|T1|T2|RUN|BIKE)\b', html, flags=re.I))
+    tokens = {t.upper() for t in tokens}
+
+    # Heuristic ordering:
+    order_keys = []
+    # Always try to place these first in sensible tri order
+    for k in ["START", "SWIM", "T1"]:
+        if k in tokens:
+            order_keys.append(k)
+            tokens.remove(k)
+
+    # Bikes then transition
+    bikes = sorted([t for t in list(tokens) if t.startswith("BIKE") and t[4:].isdigit()], key=lambda x: int(x[4:]))
+    for b in bikes:
+        order_keys.append(b)
+        tokens.discard(b)
+    if "BIKE" in tokens:
+        order_keys.append("BIKE"); tokens.discard("BIKE")
+    if "T2" in tokens:
+        order_keys.append("T2"); tokens.discard("T2")
+
+    # Runs (handles RUN, RUN37-style, etc.)
+    runs = sorted([t for t in list(tokens) if t.startswith("RUN") and len(t) > 3 and t[3:].isdigit()], key=lambda x: int(x[3:]))
+    for rname in runs:
+        order_keys.append(rname)
+        tokens.discard(rname)
+    if "RUN" in tokens:
+        order_keys.append("RUN"); tokens.discard("RUN")
+
+    # Finish at end if present
+    if "FINISH" in tokens:
+        order_keys.append("FINISH"); tokens.discard("FINISH")
+
+    # Append anything leftover (just in case)
+    order_keys.extend(sorted(tokens))
+
+    # Make sure at least something is present; if not, fall back to a broad template
+    if not order_keys:
+        order_keys = ["START","SWIM","T1"] + [f"BIKE{i}" for i in range(1, 21)] + ["BIKE","T2"] + [f"RUN{i}" for i in range(1, 50)] + ["RUN","FINISH"]
+
+    return order_keys
 
 def _normalize_rows(js, point: str) -> pd.DataFrame:
     rows = (js or {}).get("rows") or []
@@ -52,7 +106,7 @@ def _normalize_rows(js, point: str) -> pd.DataFrame:
     if "name" not in df.columns:
         df["name"] = None
     if "netTime" not in df.columns:
-        if {"hh", "mm", "ss"} <= set(df.columns):
+        if {"hh","mm","ss"} <= set(df.columns):
             df["netTime"] = (
                 df["hh"].astype(int).astype(str) + ":" +
                 df["mm"].astype(int).astype(str).str.zfill(2) + ":" +
@@ -61,68 +115,55 @@ def _normalize_rows(js, point: str) -> pd.DataFrame:
         else:
             df["netTime"] = None
     df["split"] = point
-    return df[["name", "split", "netTime"]]
+    return df[["name","split","netTime"]]
 
 def _fetch_point_df(point: str) -> pd.DataFrame:
     """
-    Try multiple endpoint variants with cache-buster and realistic headers.
-    Returns DataFrame[name, split, netTime] or empty DF.
-    Raises last exception only if all variants fail.
+    Primary: /api/table?event=...&category=...&split=POINT
+    Fallbacks: legacy split endpoints.
     """
     cache_bust = int(time.time())
-
-    # Variant A (original): /e/{EVENT}/categories/{CATEGORY}/splits/{POINT}
+    url_api = f"{BASE}/api/table?event={EVENT}&category={CATEGORY}&split={point}&t={cache_bust}"
     url_a = f"{BASE}/e/{EVENT}/categories/{CATEGORY}/splits/{point}?t={cache_bust}"
-
-    # Variant B (alt form): /e/{EVENT}/splits/{POINT}?category={CATEGORY}
     url_b = f"{BASE}/e/{EVENT}/splits/{point}?category={CATEGORY}&t={cache_bust}"
 
-    # Some RTRT deployments require POST, others GET. We’ll try both.
-    errors = []
-
-    # A: GET
+    # Table API first
     try:
-        r = requests.get(url_a, headers=HEADERS, timeout=20)
+        r = requests.get(url_api, headers=HEADERS_JSON, timeout=20)
+        r.raise_for_status()
+        return _normalize_rows(r.json(), point)
+    except Exception:
+        pass
+
+    # Legacy A
+    try:
+        r = requests.get(url_a, headers=HEADERS_JSON, timeout=20)
+        r.raise_for_status()
+        return _normalize_rows(r.json(), point)
+    except Exception:
+        pass
+
+    # Legacy B
+    try:
+        r = requests.get(url_b, headers=HEADERS_JSON, timeout=20)
         r.raise_for_status()
         return _normalize_rows(r.json(), point)
     except Exception as e:
-        errors.append(("GET A", str(e)))
-
-    # A: POST (without categories body)
-    try:
-        r = requests.post(url_a, headers=HEADERS, timeout=20)
-        r.raise_for_status()
-        return _normalize_rows(r.json(), point)
-    except Exception as e:
-        errors.append(("POST A", str(e)))
-
-    # B: GET
-    try:
-        r = requests.get(url_b, headers=HEADERS, timeout=20)
-        r.raise_for_status()
-        return _normalize_rows(r.json(), point)
-    except Exception as e:
-        errors.append(("GET B", str(e)))
-
-    # B: POST
-    try:
-        r = requests.post(url_b, headers=HEADERS, timeout=20)
-        r.raise_for_status()
-        return _normalize_rows(r.json(), point)
-    except Exception as e:
-        errors.append(("POST B", str(e)))
-        # We gave it four tries; return empty DF but log the last error by raising.
-        raise RuntimeError(f"All variants failed for {point}. Last: {errors[-1][0]} -> {errors[-1][1]}")
+        raise RuntimeError(f"All variants failed for {point}. Last: {str(e)}")
 
 @st.cache_data(ttl=180, show_spinner=True)
 def refresh_long_csv() -> dict:
     """
-    Pulls all POINTS and writes long.csv. Returns diagnostic dict.
-    ttl=180s ensures the app re-runs roughly every 3 minutes while open.
+    Discovers actual split IDs from the event HTML, then fetches tables per split and writes long.csv.
+    Returns diagnostics including discovered splits.
     """
+    # 1) Discover the split IDs the site is using
+    discovered = _discover_splits()
+
+    # 2) Fetch
     frames, fetched, errors = [], 0, 0
     first_error = None
-    for p in POINTS:
+    for p in discovered:
         try:
             dfp = _fetch_point_df(p)
             if not dfp.empty:
@@ -132,7 +173,7 @@ def refresh_long_csv() -> dict:
             errors += 1
             if first_error is None:
                 first_error = str(e)
-        time.sleep(0.12)  # be gentle to API
+        time.sleep(0.10)
 
     ts = pd.Timestamp.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
     wrote = False
@@ -148,8 +189,9 @@ def refresh_long_csv() -> dict:
         "errors": errors,
         "first_error": first_error,
         "wrote_csv": wrote,
-        "sample_split_url_a": f"{BASE}/e/{EVENT}/categories/{CATEGORY}/splits/SWIM",
-        "sample_split_url_b": f"{BASE}/e/{EVENT}/splits/SWIM?category={CATEGORY}",
+        "discovered_splits": discovered[:60],  # show first 60 for sanity
+        "sample_table_api": f"{BASE}/api/table?event={EVENT}&category={CATEGORY}&split=SWIM",
+        "app_event_url": f"{BASE}/e/{EVENT}#/leaderboard/{CATEGORY.lower()}-ironman",
     }
 
 # Trigger refresh on run; returns diagnostics for display
@@ -161,8 +203,8 @@ fetch_info = refresh_long_csv()
 st.caption("Live source diagnostics")
 with st.expander("Show fetch details"):
     st.json(fetch_info)
-    st.markdown(f"[Open sample A]({fetch_info['sample_split_url_a']})")
-    st.markdown(f"[Open sample B]({fetch_info['sample_split_url_b']})")
+    st.markdown(f"[Open event page]({fetch_info['app_event_url']})")
+    st.markdown(f"[Open sample table API]({fetch_info['sample_table_api']})")
 
 # =========================
 # 4) Course distances and ordering
