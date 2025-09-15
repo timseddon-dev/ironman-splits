@@ -185,15 +185,25 @@ if lf.empty:
     st.info("Waiting for live data...")
     selected = []
 else:
+    # Map each split to a progression index based on the categorical order
+    split_order = {s: i for i, s in enumerate(df["split"].cat.categories)}
+    lf["split_idx"] = lf["split"].map(split_order)
+
+    # For each athlete, get their latest row (max split_idx, then latest time within that split)
     latest = (
-        lf.sort_values(["name", "net_td"])
+        lf.sort_values(["split_idx", "net_td"])
           .groupby("name", as_index=False)
           .tail(1)
           .reset_index(drop=True)
     )
+
+    # Compute behind in minutes
     latest["gap_min"] = (latest["net_td"] - latest["leader_td"]).dt.total_seconds() / 60.0
     latest["gap_min"] = latest["gap_min"].clip(lower=0)
-    latest = latest.sort_values(["gap_min", "net_td"]).reset_index(drop=True)
+
+    # Sort primarily by how far they’ve progressed (split_idx), then by gap
+    # Higher split_idx means farther along, so sort descending on split_idx, then ascending on gap_min
+    latest = latest.sort_values(["split_idx", "gap_min", "net_td"], ascending=[False, True, True]).reset_index(drop=True)
 
     latest["Latest split"] = latest["split"].map(lambda s: friendly_label(s, split_km_map))
     latest["Behind (min)"] = latest["gap_min"].map(lambda x: f"{x:.1f}")
@@ -213,11 +223,14 @@ else:
     st.markdown('<div class="lb-row lb-head"><strong>Athlete</strong><strong>Latest split</strong><strong>Behind</strong><strong>Plot</strong></div>', unsafe_allow_html=True)
     st.markdown('<div class="lb-wrap">', unsafe_allow_html=True)
 
+    # Checkbox state
     if "plot_checks" not in st.session_state:
         st.session_state.plot_checks = {}
         top = set(latest.head(10)["name"])
         for nm in latest["name"]:
             st.session_state.plot_checks[nm] = nm in top
+
+    # Ensure current leader (first row after our sort) is always selected and cannot be unselected
     leader_name = latest.iloc[0]["name"]
     st.session_state.plot_checks[leader_name] = True
 
