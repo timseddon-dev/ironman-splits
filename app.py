@@ -175,6 +175,44 @@ else:
           .tail(1)
           .reset_index(drop=True)
     )
+# 5A) Compute per-athlete latest row correctly and derive labels
+# Merge leaders and keep a copy with valid times only
+lf = df.merge(leaders, on="split", how="left")
+lf_valid = lf.dropna(subset=["net_td", "leader_td"]).copy()
+
+# Progression index across the categorical split order
+split_order = {s: i for i, s in enumerate(df["split"].cat.categories)}
+lf_valid["split_idx"] = lf_valid["split"].map(split_order)
+
+# Latest row per athlete = last chronological split with a valid time
+# If there are multiple rows at the same split, take the one with the smallest net time
+latest = (
+    lf_valid.sort_values(["name", "split_idx", "net_td"])
+            .groupby("name", as_index=False)
+            .tail(1)
+            .reset_index(drop=True)
+)
+
+# Gap in minutes (clipped to 0)
+latest["gap_min"] = (latest["net_td"] - latest["leader_td"]).dt.total_seconds() / 60.0
+latest["gap_min"] = latest["gap_min"].clip(lower=0)
+
+# Latest split label: prefer the row’s own label; fallback to friendly_label
+def latest_label(row):
+    lbl = str(row.get("label") or "").strip()
+    if lbl:
+        return lbl
+    return friendly_label(row["split"], split_km_map)
+
+latest["Latest split"] = latest.apply(latest_label, axis=1)
+latest["Behind (min)"] = latest["gap_min"].map(lambda x: f"{x:.1f}")
+
+# Sort for display: most progressed first, then smallest gap, then net time
+latest = latest.sort_values(
+    ["split_idx", "gap_min", "net_td"],
+    ascending=[False, True, True]
+).reset_index(drop=True)
+
 
     # 5.3) Compute gap and sort by progression then gap
     latest["gap_min"] = (latest["net_td"] - latest["leader_td"]).dt.total_seconds() / 60.0
@@ -283,28 +321,30 @@ if not plot_df.empty:
     else:
         x_ticks = []
 
-    # 8.4) Vertical reference lines at SWIM and BIKE (as data series)
-    ref_points = {}
-    for anchor in ["SWIM", "BIKE"]:
-        sub = xy[xy["split"] == anchor]
-        if not sub.empty:
-            ref_points[anchor] = float(sub["leader_hr"].min())
+    # 8.4) Vertical reference lines at SWIM, BIKE, T1, T2 (as solid data series)
+ref_points = {}
+for anchor in ["SWIM", "T1", "BIKE", "T2"]:
+    sub = xy[xy["split"] == anchor]
+    if not sub.empty:
+        ref_points[anchor] = float(sub["leader_hr"].min())
 
-    # Determine Y span for reference lines
-    y_min = 0.0
-    y_max = float(xy["gap_min_pos"].max()) if len(xy) else 1.0
-    y_max = max(y_max, 1.0)  # ensure visible
+# Determine Y span for reference lines (full plot height)
+y_min = 0.0
+y_max = float(xy["gap_min_pos"].max()) if len(xy) else 1.0
+y_max = max(y_max, 1.0)
 
-    for anchor, x_val in ref_points.items():
-        fig.add_trace(go.Scatter(
-            x=[x_val, x_val],
-            y=[y_min, y_max],
-            mode="lines",
-            line=dict(color="rgba(0,0,0,0.5)", width=1, dash="dot"),
-            name=anchor,
-            showlegend=False,
-            hoverinfo="skip"
-        ))
+for anchor, x_val in ref_points.items():
+    color = {"SWIM": "rgba(0,0,0,0.45)", "T1": "rgba(0,0,0,0.35)",
+             "BIKE": "rgba(0,0,0,0.45)", "T2": "rgba(0,0,0,0.35)"}[anchor]
+    fig.add_trace(go.Scatter(
+        x=[x_val, x_val],
+        y=[y_min, y_max],
+        mode="lines",
+        line=dict(color=color, width=1.5, dash="solid"),  # solid, full height
+        name=anchor,
+        showlegend=False,
+        hovertemplate=f"{anchor} at leader elapsed: %{x:.2f} h",
+    ))
 
     # 8.5) Layout and axes
     fig.update_xaxes(
