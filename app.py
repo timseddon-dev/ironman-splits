@@ -140,7 +140,7 @@ def split_range(splits, a, b):
 df = load_data(DATA_FILE)
 split_km_map = build_split_distance_map(df)
 
-st.title("Live Gaps vs Leader")
+st.title("Ironman tracker (WIP)")
 
 # 5) Leaderboard data preparation
 
