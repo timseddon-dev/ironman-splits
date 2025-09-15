@@ -9,7 +9,7 @@ import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
 
-st.set_page_config(page_title="Live Gaps vs Leader", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="Ironman tracker (WIP)", layout="wide", initial_sidebar_state="collapsed")
 
 DATA_FILE = "long.csv"
 
