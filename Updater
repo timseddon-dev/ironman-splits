@@ -72,13 +72,7 @@ def run_once() -> int:
     long_df.to_csv(OUT, index=False, encoding="utf-8")
     return len(long_df)
 
-# 4) Main loop: update every 3 minutes
+# 4) One-shot run
 if __name__ == "__main__":
-    print("Updater started. Writing long.csv every 3 minutes...")
-    while True:
-        try:
-            n = run_once()
-            print(f"Wrote {n} rows to {OUT}")
-        except Exception as e:
-            print(f"Update failed: {e}")
-        time.sleep(180)  # 3 minutes
+    n = run_once()
+    print(f"Wrote {n} rows to {OUT}")
