@@ -25,10 +25,7 @@ jobs:
 
       - name: Run updater.py (one-shot)
         run: |
-          python - << 'PY'
-          import updater
-          n = updater.run_once()
-          print(f"Wrote {n} rows to {updater.OUT}")
+          python updater.py << 'PY'
           PY
 
       - name: Commit long.csv
