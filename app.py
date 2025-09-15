@@ -330,8 +330,8 @@ for anchor, x_val in ref_points.items():
         line=dict(color=color, width=1.5, dash="solid"),  # solid, full height
         name=anchor,
         showlegend=False,
-        hovertemplate=f"{anchor} at leader elapsed: %{x:.2f} h",
-    )
+       hovertemplate=anchor + " at leader elapsed: %{x:.2f} h",
+    ))
 
     # 8.5) Layout and axes
     fig.update_xaxes(
