@@ -1,282 +1,310 @@
-import os
-import sys
-import time
-import math
+import os, re, math, statistics
 import pandas as pd
 import streamlit as st
+import plotly.graph_objects as go
 
-# Optional charting (installed via requirements)
-import plotly.express as px
+st.set_page_config(page_title="Live Gaps vs Leader", layout="wide", initial_sidebar_state="collapsed")
 
-# ------------------------------
-# Page setup
-# ------------------------------
-st.set_page_config(page_title="IRONMAN Splits Viewer", layout="wide")
-st.title("IRONMAN Splits Viewer")
+DATA_FILE = "long.csv"
 
-# Small helper to show environment versions
-with st.expander("Environment info", expanded=False):
-    st.write("Working directory:", os.getcwd())
-    try:
-        import numpy as np
-        st.write("Python:", sys.version)
-        st.write("Streamlit:", st.__version__)
-        st.write("Pandas:", pd.__version__)
-    except Exception:
-        pass
-
-CSV_PATH = "long.csv"
-
-# ------------------------------
-# Load data
-# ------------------------------
-if not os.path.exists(CSV_PATH):
-    st.error("long.csv not found in the repository root.")
-    st.info("To create it: go to GitHub → Actions → 'Run updater (manual)' → Run workflow. Then refresh this app.")
-    st.stop()
-
-try:
-    df = pd.read_csv(CSV_PATH)
-except Exception as e:
-    st.error("Could not read long.csv.")
-    st.exception(e)
-    st.stop()
-
-if df.empty:
-    st.warning("long.csv is empty. Run the GitHub Action to fetch data, then refresh.")
-    st.stop()
-
-# Normalize column names we expect
-for col in ["name", "bib", "split", "netTime", "label", "placeChange", "pace", "speed", "timestamp"]:
-    if col not in df.columns:
-        df[col] = None
-
-# Clean types
-df["name"] = df["name"].astype(str).str.strip().replace({"None": None, "nan": None})
-df["split"] = df["split"].astype(str).str.strip().replace({"None": None, "nan": None})
-df["label"] = df["label"].astype(str).str.strip().replace({"None": None, "nan": None})
-df["placeChange"] = df["placeChange"].astype(str).str.strip().replace({"None": None, "nan": None})
-df["pace"] = df["pace"].astype(str).str.strip().replace({"None": None, "nan": None})
-df["speed"] = df["speed"].astype(str).str.strip().replace({"None": None, "nan": None})
-
-# bib could be numeric or string; keep as string for easy matching
-df["bib"] = df["bib"].astype(str).str.strip().replace({"None": None, "nan": None})
-
-# ------------------------------
-# Helpers
-# ------------------------------
-def parse_net_time_to_seconds(t):
-    """
-    Parse netTime variants like:
-    - "00:45:10.609"
-    - "5:12:34"
-    - "45:10"
-    Returns float seconds or None.
-    """
-    if pd.isna(t):
-        return None
-    s = str(t).strip()
-    if not s or s.lower() in {"nan", "none"}:
-        return None
-    # Split by ':'
-    parts = s.split(":")
-    try:
-        parts = [float(p) for p in parts]
-    except Exception:
-        return None
-
-    if len(parts) == 3:
-        hh, mm, ss = parts
-        return hh * 3600 + mm * 60 + ss
-    elif len(parts) == 2:
-        mm, ss = parts
-        return mm * 60 + ss
-    elif len(parts) == 1:
-        return parts[0]  # already seconds
-    return None
-
-df["netTime_sec"] = df["netTime"].apply(parse_net_time_to_seconds)
-
-def split_sort_key(s):
-    """Sort splits in a sensible triathlon order."""
-    s = str(s or "")
-    # Map common exact points
-    if s == "SWIM": return (0, 0)
-    if s == "T1": return (1, 0)
-    if s.startswith("BIKE"):
-        # Handle "BIKE1"..."BIKE25" and "BIKE"
-        if s == "BIKE": return (2, 999)
-        try:
-            n = int(s.replace("BIKE", ""))
-            return (2, n)
-        except Exception:
-            return (2, 998)
-    if s == "T2": return (3, 0)
-    if s.startswith("RUN"):
-        # Handle "RUN1"..."RUN22" and "RUN"
-        if s == "RUN": return (4, 999)
-        try:
-            n = int(s.replace("RUN", ""))
-            return (4, n)
-        except Exception:
-            return (4, 998)
-    if s == "FINISH": return (5, 0)
-    return (9, s)
-
-# ------------------------------
-# Sidebar controls
-# ------------------------------
-st.sidebar.header("Filters")
-
-# Split filter (multiselect shows all available)
-all_splits = sorted(df["split"].dropna().unique().tolist(), key=split_sort_key)
-selected_splits = st.sidebar.multiselect("Splits", options=all_splits, default=all_splits)
-
-# Name search
-name_query = st.sidebar.text_input("Search name (substring)")
-
-# Bib search
-bib_query = st.sidebar.text_input("Search bib (exact or substring)")
-
-# Place change quick filter
-place_change_choice = st.sidebar.selectbox(
-    "Place change filter",
-    options=["All", "Positive only", "Negative only", "Zero only", "Missing only"],
-    index=0,
+# Order we’ll show, filtered to what exists in the CSV
+ORDER = (
+    ["START", "SWIM", "T1"] +
+    [f"BIKE{i}" for i in range(1, 21)] + ["BIKE", "T2"] +
+    [f"RUN{i}" for i in range(1, 28)] + ["RUN", "FINISH"]
 )
 
-# Apply filters
-df_view = df.copy()
+# ---------- Helpers to parse distances from label ----------
+DIST_RE = re.compile(r"(?P<val>\d+(?:\.\d+)?)\s*(?P<unit>km|k|m|mi|mile|miles)", re.IGNORECASE)
 
-if selected_splits:
-    df_view = df_view[df_view["split"].isin(selected_splits)]
+def parse_distance_km_from_label(label: str):
+    """
+    Returns float kilometers or None.
+    Accepts '3.8 km', '1500 m', '25 mi', '3.8km', etc.
+    """
+    if not isinstance(label, str) or not label.strip():
+        return None
+    m = DIST_RE.search(label)
+    if not m:
+        return None
+    val = float(m.group("val"))
+    unit = m.group("unit").lower()
+    if unit in ("km", "k"):
+        return val
+    if unit == "m":
+        return val / 1000.0
+    if unit in ("mi", "mile", "miles"):
+        return val * 1.609344
+    return None
 
-if name_query:
-    nq = name_query.strip().lower()
-    df_view = df_view[df_view["name"].fillna("").str.lower().str.contains(nq)]
+def build_split_distance_map(df: pd.DataFrame) -> dict:
+    """
+    For each split, parse distances from label and pick the most common numeric value.
+    """
+    dists = {}
+    if "split" not in df.columns:
+        return dists
+    # Ensure label column exists
+    if "label" not in df.columns:
+        df = df.assign(label=None)
 
-if bib_query:
-    bq = bib_query.strip().lower()
-    df_view = df_view[df_view["bib"].fillna("").str.lower().str.contains(bq)]
+    for split, g in df.groupby("split"):
+        vals = []
+        for lbl in g["label"].dropna().astype(str):
+            km = parse_distance_km_from_label(lbl)
+            if km is not None:
+                # round to 1 decimal for stability (e.g., 40.899 -> 40.9)
+                vals.append(round(km, 1))
+        if vals:
+            # Choose the mode; if tie, use median
+            try:
+                chosen = statistics.mode(vals)
+            except statistics.StatisticsError:
+                chosen = statistics.median(vals)
+            dists[str(split)] = float(chosen)
+    return dists
 
-if place_change_choice != "All":
-    def pc_bucket(x):
-        if x in (None, "", "None", "nan"):
-            return "Missing"
+def friendly_label(split: str, split_km: dict) -> str:
+    s = str(split).upper()
+    if s == "START":
+        return "Start"
+    if s == "FINISH":
+        return "Finish"
+    if s in ("T1", "T2"):
+        return s
+    km = split_km.get(s)
+    if km is None:
+        # Fall back to generic names if no distance available
+        if s == "SWIM": return "Swim"
+        if s.startswith("BIKE"): return "Bike"
+        if s.startswith("RUN"): return "Run"
+        return s
+    if s == "SWIM":
+        return f"Swim {km:.1f} km"
+    if s.startswith("BIKE"):
+        return f"Bike {km:.1f} km"
+    if s.startswith("RUN"):
+        return f"Run {km:.1f} km"
+    return f"{s} {km:.1f} km"
+
+@st.cache_data(ttl=30, show_spinner=False)
+def load_data(path: str) -> pd.DataFrame:
+    if not os.path.exists(path):
+        return pd.DataFrame(columns=["name", "split", "netTime", "label"])
+
+    df = pd.read_csv(path)
+    if df.empty:
+        return pd.DataFrame(columns=["name", "split", "netTime", "label"])
+
+    # Normalize
+    if "name" not in df.columns or "split" not in df.columns:
+        if "athlete" in df.columns and "split" in df.columns:
+            df["name"] = df["athlete"]
+        else:
+            return pd.DataFrame(columns=["name", "split", "netTime", "label"])
+
+    for c in ["name", "split", "label"]:
+        if c not in df.columns:
+            df[c] = None
+
+    df["name"] = df["name"].astype(str).str.strip()
+    df["split"] = df["split"].astype(str).str.strip().str.upper()
+    df["label"] = df["label"].astype(str).str.strip()
+
+    # Parse elapsed net time to timedelta
+    def parse_td(s):
+        if pd.isna(s):
+            return pd.NaT
+        x = str(s).strip()
+        # Pad times like H:MM:SS and MM:SS into HH:MM:SS
+        if re.fullmatch(r"\d:\d{2}:\d{2}(\.\d+)?", x):
+            x = "0" + x
+        if re.fullmatch(r"\d{1,2}:\d{2}", x):
+            x = "0:" + x
         try:
-            val = float(x)
+            return pd.to_timedelta(x)
         except Exception:
-            return "Missing"
-        if val > 0:
-            return "Positive"
-        if val < 0:
-            return "Negative"
-        return "Zero"
-    bucket = {
-        "Positive only": "Positive",
-        "Negative only": "Negative",
-        "Zero only": "Zero",
-        "Missing only": "Missing",
-    }[place_change_choice]
-    df_view = df_view[df_view["placeChange"].apply(pc_bucket) == bucket]
+            return pd.NaT
 
-# Order for readability
-df_view = df_view.sort_values(["name", "split"], key=lambda c: c.map(split_sort_key) if c.name == "split" else c)
-
-# ------------------------------
-# Top metrics
-# ------------------------------
-st.subheader("Summary")
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Rows (filtered)", f"{len(df_view):,}")
-c2.metric("Athletes", f"{df_view['name'].nunique():,}")
-c3.metric("Splits", f"{df_view['split'].nunique():,}")
-# Show how many have placeChange
-has_pc = df_view["placeChange"].notna().sum()
-c4.metric("Rows with placeChange", f"{has_pc:,}")
-
-st.caption("Need newer data? Run the GitHub Action:")
-st.link_button("Run updater (manual) on GitHub", url="https://github.com/timseddon-dev/ironman-splits/actions")
-
-# ------------------------------
-# Data preview
-# ------------------------------
-st.subheader("Data preview")
-preview_cols = ["name", "bib", "split", "netTime", "label", "placeChange", "pace", "speed", "timestamp"]
-existing_preview_cols = [c for c in preview_cols if c in df_view.columns]
-st.dataframe(df_view[existing_preview_cols].head(250), use_container_width=True)
-
-# ------------------------------
-# Charts
-# ------------------------------
-st.subheader("Charts")
-
-tab1, tab2 = st.tabs(["Distribution by split (box plot)", "Per-athlete split trend"])
-
-with tab1:
-    df_box = df_view.dropna(subset=["netTime_sec", "split"]).copy()
-    if df_box.empty:
-        st.info("No parsable netTime values yet for charting.")
+    if "netTime" in df.columns:
+        df["net_td"] = df["netTime"].apply(parse_td)
     else:
-        df_box["split_sorted"] = df_box["split"].apply(split_sort_key)
-        df_box = df_box.sort_values(["split_sorted"])
-        fig = px.box(
-            df_box,
-            x="split",
-            y="netTime_sec",
-            points=False,
-            title="Net time (seconds) by split",
-        )
-        fig.update_layout(height=450, margin=dict(l=10, r=10, t=40, b=10))
-        st.plotly_chart(fig, use_container_width=True)
+        df["net_td"] = pd.NaT
 
-with tab2:
-    # Let user choose athletes for the trend
-    athletes = df_view["name"].dropna().unique().tolist()
-    default_sel = athletes[:5] if len(athletes) > 0 else []
-    selected_athletes = st.multiselect("Select athletes", options=athletes, default=default_sel, key="ath_trend")
+    # Add a zero START row per athlete to anchor lines
+    starts = df[["name"]].drop_duplicates().assign(split="START", net_td=pd.to_timedelta(0, unit="s"), label="Start")
+    df = pd.concat([starts, df[["name", "split", "net_td", "label"]]], ignore_index=True)
 
-    df_trend = df_view[df_view["name"].isin(selected_athletes)].dropna(subset=["netTime_sec", "split"]).copy()
-    if df_trend.empty:
-        st.info("Select athletes that have netTime values to see trends.")
-    else:
-        # Keep split order consistent
-        df_trend["split_sorted"] = df_trend["split"].apply(split_sort_key)
-        df_trend = df_trend.sort_values(["name", "split_sorted"])
-        fig2 = px.line(
-            df_trend,
-            x="split",
-            y="netTime_sec",
-            color="name",
-            markers=True,
-            title="Per-athlete net time trend across splits",
-        )
-        fig2.update_layout(height=450, margin=dict(l=10, r=10, t=40, b=10))
-        st.plotly_chart(fig2, use_container_width=True)
+    # Order splits by our ORDER but only keep those present
+    have = df["split"].dropna().unique().tolist()
+    ordered = [s for s in ORDER if s in have]
+    df["split"] = pd.Categorical(df["split"], categories=ordered, ordered=True)
+    return df.dropna(subset=["split"])
 
-# ------------------------------
-# Place change highlight table
-# ------------------------------
-st.subheader("Place change highlights")
-df_pc = df_view.copy()
-def pc_numeric(x):
-    try:
-        return float(x)
-    except Exception:
-        return math.nan
-df_pc["placeChange_num"] = df_pc["placeChange"].apply(pc_numeric)
+def compute_leader(df: pd.DataFrame) -> pd.DataFrame:
+    d = df.dropna(subset=["net_td"]).copy()
+    if d.empty:
+        return pd.DataFrame(columns=["split", "leader_td"])
+    return (
+        d.sort_values(["split", "net_td"])
+         .groupby("split", as_index=False)
+         .agg(leader_td=("net_td", "min"))
+    )
 
-if df_pc["placeChange_num"].notna().any():
-    # Sort by magnitude of change for visibility
-    df_pc = df_pc.sort_values("placeChange_num", key=lambda s: s.abs(), ascending=False)
-    show_cols = ["name", "bib", "split", "netTime", "label", "placeChange", "pace", "speed"]
-    show_cols = [c for c in show_cols if c in df_pc.columns]
-    st.dataframe(df_pc[show_cols].head(100), use_container_width=True)
+def split_range(splits, a, b):
+    if a not in splits or b not in splits:
+        return splits
+    i0, i1 = splits.index(a), splits.index(b)
+    if i0 <= i1:
+        return splits[i0:i1+1]
+    return splits[i1:i0+1]
+
+# Load current data
+df = load_data(DATA_FILE)
+splits_present = df["split"].cat.categories.tolist() if not df.empty else ORDER
+split_km_map = build_split_distance_map(df)
+
+st.title("Live Gaps vs Leader")
+
+# Controls
+c1, c2 = st.columns(2)
+with c1:
+    idx_from = splits_present.index("START") if "START" in splits_present else 0
+    from_split = st.selectbox("From split", splits_present, index=idx_from)
+with c2:
+    idx_to = splits_present.index("FINISH") if "FINISH" in splits_present else len(splits_present) - 1
+    to_split = st.selectbox("To split", splits_present, index=idx_to)
+
+# Leaderboard
+leaders = compute_leader(df)
+lf = df.merge(leaders, on="split", how="left").dropna(subset=["net_td", "leader_td"])
+
+st.subheader("Leaderboard")
+
+if lf.empty:
+    st.info("Waiting for live data...")
+    selected = []
 else:
-    st.info("No numeric placeChange values in the current view.")
+    latest = (
+        lf.sort_values(["name", "net_td"])
+          .groupby("name", as_index=False)
+          .tail(1)
+          .reset_index(drop=True)
+    )
+    latest["gap_min"] = (latest["net_td"] - latest["leader_td"]).dt.total_seconds() / 60.0
+    latest["gap_min"] = latest["gap_min"].clip(lower=0)
+    latest = latest.sort_values(["gap_min", "net_td"]).reset_index(drop=True)
 
-# ------------------------------
-# Footer info
-# ------------------------------
-st.divider()
-st.caption("Tip: Use the sidebar to filter by split, name, and bib. Charts update automatically.")
+    latest["Latest split"] = latest["split"].map(lambda s: friendly_label(s, split_km_map))
+    latest["Behind (min)"] = latest["gap_min"].map(lambda x: f"{x:.1f}")
+
+    st.markdown("""
+        <style>
+        .lb-wrap { max-height: 360px; overflow-y: scroll; padding-right: 8px; }
+        .lb-wrap::-webkit-scrollbar { width: 10px; }
+        .lb-wrap::-webkit-scrollbar-thumb { background: rgba(0,0,0,0.3); border-radius: 6px; }
+        .lb-row { display: grid; grid-template-columns: 1.6fr 1.2fr 0.6fr 0.5fr; gap: 12px;
+                  padding: 6px 0; border-bottom: 1px solid rgba(0,0,0,0.06); align-items: center; }
+        .lb-head { position: sticky; top: 0; background: white; z-index: 5;
+                   border-bottom: 1px solid rgba(0,0,0,0.2); padding: 6px 0; }
+        </style>
+    """, unsafe_allow_html=True)
+
+    st.markdown('<div class="lb-row lb-head"><strong>Athlete</strong><strong>Latest split</strong><strong>Behind</strong><strong>Plot</strong></div>', unsafe_allow_html=True)
+    st.markdown('<div class="lb-wrap">', unsafe_allow_html=True)
+
+    if "plot_checks" not in st.session_state:
+        st.session_state.plot_checks = {}
+        top = set(latest.head(10)["name"])
+        for nm in latest["name"]:
+            st.session_state.plot_checks[nm] = nm in top
+    leader_name = latest.iloc[0]["name"]
+    st.session_state.plot_checks[leader_name] = True
+
+    for _, r in latest.iterrows():
+        ck_key = f"plot_{r['name']}"
+        checked = st.session_state.plot_checks.get(r["name"], False)
+        cols = st.columns([1.6, 1.2, 0.6, 0.5], gap="small")
+        cols[0].markdown(f"{r['name']}")
+        cols[1].markdown(f"{r['Latest split']}")
+        cols[2].markdown(f"{r['Behind (min)']}")
+        with cols[3]:
+            st.session_state.plot_checks[r["name"]] = st.checkbox(
+                "", value=True if r["name"] == leader_name else checked,
+                key=ck_key, disabled=(r["name"] == leader_name)
+            )
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        if st.button("Select top 10"):
+            top = set(latest.head(10)["name"])
+            for k in st.session_state.plot_checks:
+                st.session_state.plot_checks[k] = (k in top) or (k == leader_name)
+    with c2:
+        if st.button("Select none"):
+            for k in st.session_state.plot_checks:
+                st.session_state.plot_checks[k] = (k == leader_name)
+    with c3:
+        if st.button("Select all"):
+            for k in st.session_state.plot_checks:
+                st.session_state.plot_checks[k] = True
+
+    selected = [nm for nm, on in st.session_state.plot_checks.items() if on]
+
+# Plot
+range_splits = split_range(splits_present, from_split, to_split)
+plot_df = df[(df["name"].isin(selected)) & (df["split"].astype(str).isin(range_splits))].copy()
+
+if not plot_df.empty:
+    leaders = compute_leader(df)
+    xy = plot_df.merge(leaders, on="split", how="left").dropna(subset=["net_td", "leader_td"])
+    xy["leader_hr"] = xy["leader_td"].dt.total_seconds() / 3600.0
+    xy["gap_min_pos"] = ((xy["net_td"] - xy["leader_td"]).dt.total_seconds() / 60.0).clip(lower=0)
+    xy["split_label"] = xy["split"].map(lambda s: friendly_label(s, split_km_map))
+
+    fig = go.Figure()
+    for nm, g in xy.groupby("name", sort=False):
+        g = g.sort_values("leader_hr")
+        fig.add_trace(go.Scatter(
+            x=g["leader_hr"], y=g["gap_min_pos"],
+            mode="lines", line=dict(width=1.8),
+            name=nm, showlegend=False,
+            hovertemplate="Athlete: %{text}<br>Split: %{meta}<br>Leader elapsed: %{x:.2f} h<br>Behind: %{y:.1f} min",
+            text=[nm]*len(g), meta=g["split_label"],
+        ))
+
+    ends = (xy.sort_values(["name", "leader_hr"]).groupby("name", as_index=False).tail(1))
+    labels = []
+    for _, r in ends.iterrows():
+        labels.append(dict(
+            x=float(r["leader_hr"]), y=float(r["gap_min_pos"]),
+            xref="x", yref="y", text=str(r["name"]), showarrow=False,
+            xanchor="left", yanchor="middle",
+            font=dict(size=11, color="rgba(0,0,0,0.9)"),
+            bgcolor="rgba(255,255,255,0.65)", bordercolor="rgba(0,0,0,0.1)", borderwidth=1,
+        ))
+
+    if len(xy):
+        x_left = math.floor(xy["leader_hr"].min() / 0.5) * 0.5
+        x_right = math.ceil(xy["leader_hr"].max() / 0.5) * 0.5 + 0.25
+        x_ticks = [round(x_left + 0.5 * i, 2) for i in range(int((x_right - x_left) / 0.5) + 1)]
+    else:
+        x_ticks = []
+
+    fig.update_xaxes(
+        title="Leader elapsed (h)",
+        tickvals=x_ticks,
+        ticktext=[f"{int(v)}:{int((v%1)*60):02d}" for v in x_ticks],
+        showgrid=True, zeroline=False, showline=True, mirror=True, ticks="outside"
+    )
+    fig.update_yaxes(
+        title="Time behind leader (min)",
+        autorange="reversed",
+        showgrid=True, zeroline=True, zerolinecolor="rgba(0,0,0,0.25)",
+        showline=True, mirror=True, ticks="outside"
+    )
+    fig.update_layout(height=520, margin=dict(l=50, r=30, t=30, b=40), annotations=labels)
+    st.plotly_chart(fig, use_container_width=True)
+else:
+    st.info("Select athletes to plot.")
