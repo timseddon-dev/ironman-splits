@@ -1,3 +1,84 @@
+# app.py
+
+# 0) Imports and page config
+import os, re, math, statistics
+import pandas as pd
+import streamlit as st
+import plotly.graph_objects as go
+
+st.set_page_config(page_title="Live Gaps vs Leader", layout="wide", initial_sidebar_state="collapsed")
+
+# 1) Constants and ordering
+DATA_FILE = "long.csv"
+
+# Order we’ll show, filtered to what exists in the CSV
+ORDER = (
+    ["START", "SWIM", "T1"] +
+    [f"BIKE{i}" for i in range(1, 21)] + ["BIKE", "T2"] +
+    [f"RUN{i}" for i in range(1, 28)] + ["RUN", "FINISH"]
+)
+
+# 2) Helpers — distance parsing from label and friendly labels
+DIST_RE = re.compile(r"(?P<val>\d+(?:\.\d+)?)\s*(?P<unit>km|k|m|mi|mile|miles)", re.IGNORECASE)
+
+def parse_distance_km_from_label(label: str):
+    if not isinstance(label, str) or not label.strip():
+        return None
+    m = DIST_RE.search(label)
+    if not m:
+        return None
+    val = float(m.group("val"))
+    unit = m.group("unit").lower()
+    if unit in ("km", "k"):
+        return val
+    if unit == "m":
+        return val / 1000.0
+    if unit in ("mi", "mile", "miles"):
+        return val * 1.609344
+    return None
+
+def build_split_distance_map(df: pd.DataFrame) -> dict:
+    dists = {}
+    if "split" not in df.columns:
+        return dists
+    if "label" not in df.columns:
+        df = df.assign(label=None)
+    for split, g in df.groupby("split"):
+        vals = []
+        for lbl in g["label"].dropna().astype(str):
+            km = parse_distance_km_from_label(lbl)
+            if km is not None:
+                vals.append(round(km, 1))
+        if vals:
+            try:
+                chosen = statistics.mode(vals)
+            except statistics.StatisticsError:
+                chosen = statistics.median(vals)
+            dists[str(split)] = float(chosen)
+    return dists
+
+def friendly_label(split: str, split_km: dict) -> str:
+    s = str(split).upper()
+    if s == "START": return "Start"
+    if s == "FINISH": return "Finish"
+    if s in ("T1", "T2"): return s
+    km = split_km.get(s)
+    if km is None:
+        if s == "SWIM": return "Swim"
+        if s.startswith("BIKE"): return "Bike"
+        if s.startswith("RUN"): return "Run"
+        return s
+    if s == "SWIM": return f"Swim {km:.1f} km"
+    if s.startswith("BIKE"): return f"Bike {km:.1f} km"
+    if s.startswith("RUN"): return f"Run {km:.1f} km"
+    return f"{s} {km:.1f} km"
+
+# 3) Data loading and normalization
+@st.cache_data(ttl=30, show_spinner=False)
+def load_data(path: str) -> pd.DataFrame1) Complete app.py with all sections numbered
+Here's your entire app.py file with every major section clearly numbered for easy reference:
+
+```python
 import os, re, math, statistics
 import pandas as pd
 import streamlit as st
@@ -7,7 +88,7 @@ st.set_page_config(page_title="Live Gaps vs Leader", layout="wide", initial_side
 
 DATA_FILE = "long.csv"
 
-# Order we’ll show, filtered to what exists in the CSV
+# Order we'll show, filtered to what exists in the CSV
 ORDER = (
     ["START", "SWIM", "T1"] +
     [f"BIKE{i}" for i in range(1, 21)] + ["BIKE", "T2"] +
@@ -143,7 +224,7 @@ split_km_map = build_split_distance_map(df)
 
 st.title("Live Gaps vs Leader")
 
-# Leaderboard (sorted by progression, then gap)
+# 1) Compute leaderboard data (sorted by progression, then gap)
 leaders = compute_leader(df)
 lf = df.merge(leaders, on="split", how="left").dropna(subset=["net_td", "leader_td"])
 
@@ -153,9 +234,11 @@ if lf.empty:
     st.info("Waiting for live data...")
     selected = []
 else:
+    # 1.1) Map splits to progression indices
     split_order = {s: i for i, s in enumerate(df["split"].cat.categories)}
     lf["split_idx"] = lf["split"].map(split_order)
 
+    # 1.2) Get latest split per athlete
     latest = (
         lf.sort_values(["split_idx", "net_td"])
           .groupby("name", as_index=False)
@@ -163,17 +246,20 @@ else:
           .reset_index(drop=True)
     )
 
+    # 1.3) Compute gap and sort by progression then gap
     latest["gap_min"] = (latest["net_td"] - latest["leader_td"]).dt.total_seconds() / 60.0
     latest["gap_min"] = latest["gap_min"].clip(lower=0)
-
     latest = latest.sort_values(["split_idx", "gap_min", "net_td"], ascending=[False, True, True]).reset_index(drop=True)
 
+    # 2) Leaderboard display (scroll box with fixed window)
     latest["Latest split"] = latest["split"].map(lambda s: friendly_label(s, split_km_map))
     latest["Behind (min)"] = latest["gap_min"].map(lambda x: f"{x:.1f}")
 
+    ROW_WINDOW = 15  # visible rows at a time
+
     st.markdown("""
         <style>
-        .lb-wrap { max-height: 360px; overflow-y: scroll; padding-right: 8px; }
+        .lb-wrap { max-height: 420px; overflow-y: auto; padding-right: 8px; }
         .lb-wrap::-webkit-scrollbar { width: 10px; }
         .lb-wrap::-webkit-scrollbar-thumb { background: rgba(0,0,0,0.3); border-radius: 6px; }
         .lb-row { display: grid; grid-template-columns: 1.6fr 1.2fr 0.6fr 0.5fr; gap: 12px;
@@ -186,15 +272,20 @@ else:
     st.markdown('<div class="lb-row lb-head"><strong>Athlete</strong><strong>Latest split</strong><strong>Behind</strong><strong>Plot</strong></div>', unsafe_allow_html=True)
     st.markdown('<div class="lb-wrap">', unsafe_allow_html=True)
 
+    # 2.1) Initialize checkbox state once
     if "plot_checks" not in st.session_state:
         st.session_state.plot_checks = {}
-        top = set(latest.head(10)["name"])
         for nm in latest["name"]:
-            st.session_state.plot_checks[nm] = nm in top
+            st.session_state.plot_checks[nm] = False
+
+    # 2.2) Ensure current leader is always selected
     leader_name = latest.iloc[0]["name"]
     st.session_state.plot_checks[leader_name] = True
 
-    for _, r in latest.iterrows():
+    # 2.3) Render only a fixed window of rows for smoother UI
+    latest_vis = latest.head(ROW_WINDOW)
+
+    for _, r in latest_vis.iterrows():
         ck_key = f"plot_{r['name']}"
         checked = st.session_state.plot_checks.get(r["name"], False)
         cols = st.columns([1.6, 1.2, 0.6, 0.5], gap="small")
@@ -206,12 +297,13 @@ else:
                 "", value=True if r["name"] == leader_name else checked,
                 key=ck_key, disabled=(r["name"] == leader_name)
             )
+
     st.markdown('</div>', unsafe_allow_html=True)
 
-    # Determine selected athletes
+    # 2.4) Selected athletes (persist even when scrolled out of view)
     selected = [nm for nm, on in st.session_state.plot_checks.items() if on]
 
-# Controls moved BELOW leaderboard and ABOVE chart
+# 3) From/To split controls (moved below leaderboard, above chart)
 c1, c2 = st.columns(2)
 with c1:
     idx_from = splits_present.index("START") if "START" in splits_present else 0
@@ -220,7 +312,7 @@ with c2:
     idx_to = splits_present.index("FINISH") if "FINISH" in splits_present else len(splits_present) - 1
     to_split = st.selectbox("To split", splits_present, index=idx_to, key="to_sel")
 
-# Plot
+# 4) Plot with SWIM/BIKE guide traces
 range_splits = split_range(splits_present, from_split, to_split)
 plot_df = df[(df["name"].isin(selected)) & (df["split"].astype(str).isin(range_splits))].copy()
 
@@ -232,7 +324,8 @@ if not plot_df.empty:
     xy["split_label"] = xy["split"].map(lambda s: friendly_label(s, split_km_map))
 
     fig = go.Figure()
-    # Main athlete lines
+    
+    # 4.1) Main athlete lines
     for nm, g in xy.groupby("name", sort=False):
         g = g.sort_values("leader_hr")
         fig.add_trace(go.Scatter(
@@ -243,7 +336,7 @@ if not plot_df.empty:
             text=[nm]*len(g), meta=g["split_label"],
         ))
 
-    # End labels (no box)
+    # 4.2) End labels (no box)
     ends = (xy.sort_values(["name", "leader_hr"]).groupby("name", as_index=False).tail(1))
     annotations = [
         dict(
@@ -255,7 +348,7 @@ if not plot_df.empty:
         for _, r in ends.iterrows()
     ]
 
-    # Axis ticks
+    # 4.3) Axis ticks
     if len(xy):
         x_left = math.floor(xy["leader_hr"].min() / 0.5) * 0.5
         x_right = math.ceil(xy["leader_hr"].max() / 0.5) * 0.5 + 0.25
@@ -263,8 +356,7 @@ if not plot_df.empty:
     else:
         x_ticks = []
 
-    # Compute vertical reference series at SWIM and BIKE
-    # Find leader elapsed (x) at those splits within the plotted range
+    # 4.4) Vertical reference lines at SWIM and BIKE (as data series)
     ref_points = {}
     for anchor in ["SWIM", "BIKE"]:
         sub = xy[xy["split"] == anchor]
@@ -288,6 +380,7 @@ if not plot_df.empty:
             hoverinfo="skip"
         ))
 
+    # 4.5) Layout and axes
     fig.update_xaxes(
         title="Leader elapsed (h)",
         tickvals=x_ticks,
