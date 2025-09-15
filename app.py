@@ -154,38 +154,25 @@ split_km_map = build_split_distance_map(df)
 
 st.title("Live Gaps vs Leader")
 
-# 5) Compute leaderboard data (sorted by progression, then gap)
+# 5) Leaderboard data preparation
+
+# 5.1) Compute per-split leader times (minimum net time at each split)
 leaders = compute_leader(df)
-lf = df.merge(leaders, on="split", how="left").dropna(subset=["net_td", "leader_td"])
+# leaders columns: ["split", "leader_td"]
 
-st.subheader("Leaderboard")
-
-if lf.empty:
-    st.info("Waiting for live data...")
-    selected = []
-else:
-    # 5.1) Map splits to progression indices
-    split_order = {s: i for i, s in enumerate(df["split"].cat.categories)}
-    lf["split_idx"] = lf["split"].map(split_order)
-
-    # 5.2) Get latest split per athlete
-    latest = (
-        lf.sort_values(["split_idx", "net_td"])
-          .groupby("name", as_index=False)
-          .tail(1)
-          .reset_index(drop=True)
-    )
-# 5A) Compute per-athlete latest row correctly and derive labels
-# Merge leaders and keep a copy with valid times only
+# 5.2) Merge leader times into base data (all rows)
 lf = df.merge(leaders, on="split", how="left")
+
+# 5.2.1) Compute per-athlete latest split correctly (fixes "Run 0.0 km" issue)
+# Keep only rows with valid athlete time and valid leader time
 lf_valid = lf.dropna(subset=["net_td", "leader_td"]).copy()
 
-# Progression index across the categorical split order
+# Build a progression index using the categorical order already on df["split"]
 split_order = {s: i for i, s in enumerate(df["split"].cat.categories)}
 lf_valid["split_idx"] = lf_valid["split"].map(split_order)
 
-# Latest row per athlete = last chronological split with a valid time
-# If there are multiple rows at the same split, take the one with the smallest net time
+# For each athlete, take the chronologically latest split with a valid time
+# If duplicates at the same split exist, pick the smallest net_td
 latest = (
     lf_valid.sort_values(["name", "split_idx", "net_td"])
             .groupby("name", as_index=False)
@@ -193,31 +180,33 @@ latest = (
             .reset_index(drop=True)
 )
 
-# Gap in minutes (clipped to 0)
+# Gap to leader in minutes (non-negative)
 latest["gap_min"] = (latest["net_td"] - latest["leader_td"]).dt.total_seconds() / 60.0
 latest["gap_min"] = latest["gap_min"].clip(lower=0)
 
-# Latest split label: prefer the row’s own label; fallback to friendly_label
-def latest_label(row):
+# Derive a readable label for the latest split:
+# - Prefer the row's own "label" if present
+# - Otherwise, fallback to friendly_label(split, split_km_map)
+def _latest_label(row):
     lbl = str(row.get("label") or "").strip()
     if lbl:
         return lbl
     return friendly_label(row["split"], split_km_map)
 
-latest["Latest split"] = latest.apply(latest_label, axis=1)
+latest["Latest split"] = latest.apply(_latest_label, axis=1)
 latest["Behind (min)"] = latest["gap_min"].map(lambda x: f"{x:.1f}")
 
-# Sort for display: most progressed first, then smallest gap, then net time
+# Final sort for display:
+#   1) most progressed split first
+#   2) then smallest gap
+#   3) then smallest net time
 latest = latest.sort_values(
     ["split_idx", "gap_min", "net_td"],
     ascending=[False, True, True]
 ).reset_index(drop=True)
-    # 5.3) Compute gap and sort by progression then gap
-    latest["gap_min"] = (latest["net_td"] - latest["leader_td"]).dt.total_seconds() / 60.0
-    latest["gap_min"] = latest["gap_min"].clip(lower=0)
-    latest = latest.sort_values(["split_idx", "gap_min", "net_td"], ascending=[False, True, True]).reset_index(drop=True)
 
-
+# 5.3) Leaderboard display will use 'latest' (name, Latest split, Behind (min))
+#      e.g., your Section 6 renders a scrolling table based on 'latest'
 
 
 # 6) Leaderboard display (scrolling table with checkboxes)
