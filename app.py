@@ -212,8 +212,6 @@ latest = latest.sort_values(
     ["split_idx", "gap_min", "net_td"],
     ascending=[False, True, True]
 ).reset_index(drop=True)
-
-
     # 5.3) Compute gap and sort by progression then gap
     latest["gap_min"] = (latest["net_td"] - latest["leader_td"]).dt.total_seconds() / 60.0
     latest["gap_min"] = latest["gap_min"].clip(lower=0)
