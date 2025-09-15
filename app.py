@@ -181,57 +181,60 @@ else:
     latest["gap_min"] = latest["gap_min"].clip(lower=0)
     latest = latest.sort_values(["split_idx", "gap_min", "net_td"], ascending=[False, True, True]).reset_index(drop=True)
 
-    # 6) Leaderboard display (scroll box with fixed window)
-    latest["Latest split"] = latest["split"].map(lambda s: friendly_label(s, split_km_map))
-    latest["Behind (min)"] = latest["gap_min"].map(lambda x: f"{x:.1f}")
+   # 6) Leaderboard display (scroll box with fixed window)
+latest["Latest split"] = latest["split"].map(lambda s: friendly_label(s, split_km_map))
+latest["Behind (min)"] = latest["gap_min"].map(lambda x: f"{x:.1f}")
 
-    ROW_WINDOW = 15  # visible rows at a time
+ROW_WINDOW = 15  # rows we render; scrollbox height is set independently
 
-    st.markdown("""
-        <style>
-        .lb-wrap { max-height: 420px; overflow-y: auto; padding-right: 8px; }
-        .lb-wrap::-webkit-scrollbar { width: 10px; }
-        .lb-wrap::-webkit-scrollbar-thumb { background: rgba(0,0,0,0.3); border-radius: 6px; }
-        .lb-row { display: grid; grid-template-columns: 1.6fr 1.2fr 0.6fr 0.5fr; gap: 12px;
-                  padding: 6px 0; border-bottom: 1px solid rgba(0,0,0,0.06); align-items: center; }
-        .lb-head { position: sticky; top: 0; background: white; z-index: 5;
-                   border-bottom: 1px solid rgba(0,0,0,0.2); padding: 6px 0; }
-        </style>
-    """, unsafe_allow_html=True)
+st.markdown("""
+    <style>
+    /* Fixed-height scroll container to force scrollbars */
+    .lb-wrap { height: 460px; overflow-y: auto; padding-right: 8px; }
+    .lb-wrap::-webkit-scrollbar { width: 10px; }
+    .lb-wrap::-webkit-scrollbar-thumb { background: rgba(0,0,0,0.3); border-radius: 6px; }
+    .lb-row { display: grid; grid-template-columns: 1.6fr 1.2fr 0.6fr 0.5fr; gap: 12px;
+              padding: 6px 0; border-bottom: 1px solid rgba(0,0,0,0.06); align-items: center; }
+    .lb-head { position: sticky; top: 0; background: white; z-index: 5;
+               border-bottom: 1px solid rgba(0,0,0,0.2); padding: 6px 0; }
+    </style>
+""", unsafe_allow_html=True)
 
-    st.markdown('<div class="lb-row lb-head"><strong>Athlete</strong><strong>Latest split</strong><strong>Behind</strong><strong>Plot</strong></div>', unsafe_allow_html=True)
-    st.markdown('<div class="lb-wrap">', unsafe_allow_html=True)
+st.markdown('<div class="lb-row lb-head"><strong>Athlete</strong><strong>Latest split</strong><strong>Behind</strong><strong>Plot</strong></div>', unsafe_allow_html=True)
+st.markdown('<div class="lb-wrap">', unsafe_allow_html=True)
 
-    # 6.1) Initialize checkbox state once
-    if "plot_checks" not in st.session_state:
-        st.session_state.plot_checks = {}
-        for nm in latest["name"]:
-            st.session_state.plot_checks[nm] = False
+# 6.1) Initialize checkbox state once
+if "plot_checks" not in st.session_state:
+    st.session_state.plot_checks = {}
+    for nm in latest["name"]:
+        st.session_state.plot_checks[nm] = False
 
-    # 6.2) Ensure current leader is always selected
-    leader_name = latest.iloc[0]["name"]
-    st.session_state.plot_checks[leader_name] = True
+# 6.2) Ensure current leader is always selected
+leader_name = latest.iloc[0]["name"]
+st.session_state.plot_checks[leader_name] = True
 
-    # 6.3) Render only a fixed window of rows for smoother UI
-    latest_vis = latest.head(ROW_WINDOW)
+# 6.3) Render a larger set so the container actually needs to scroll
+# We still only render a subset to keep DOM light, but more than the container can show.
+RENDER_ROWS = min(len(latest), 100)  # render up to 100 rows so scrollbar appears
+latest_vis = latest.head(RENDER_ROWS)
 
-    for _, r in latest_vis.iterrows():
-        ck_key = f"plot_{r['name']}"
-        checked = st.session_state.plot_checks.get(r["name"], False)
-        cols = st.columns([1.6, 1.2, 0.6, 0.5], gap="small")
-        cols[0].markdown(f"{r['name']}")
-        cols[1].markdown(f"{r['Latest split']}")
-        cols[2].markdown(f"{r['Behind (min)']}")
-        with cols[3]:
-            st.session_state.plot_checks[r["name"]] = st.checkbox(
-                "", value=True if r["name"] == leader_name else checked,
-                key=ck_key, disabled=(r["name"] == leader_name)
-            )
+for _, r in latest_vis.iterrows():
+    ck_key = f"plot_{r['name']}"
+    checked = st.session_state.plot_checks.get(r["name"], False)
+    cols = st.columns([1.6, 1.2, 0.6, 0.5], gap="small")
+    cols[0].markdown(f"{r['name']}")
+    cols[1].markdown(f"{r['Latest split']}")
+    cols[2].markdown(f"{r['Behind (min)']}")
+    with cols[3]:
+        st.session_state.plot_checks[r["name"]] = st.checkbox(
+            "", value=True if r["name"] == leader_name else checked,
+            key=ck_key, disabled=(r["name"] == leader_name)
+        )
 
-    st.markdown('</div>', unsafe_allow_html=True)
+st.markdown('</div>', unsafe_allow_html=True)
 
-    # 6.4) Selected athletes (persist even when scrolled out of view)
-    selected = [nm for nm, on in st.session_state.plot_checks.items() if on]
+# 6.4) Selected athletes
+selected = [nm for nm, on in st.session_state.plot_checks.items() if on]
 
 # 7) From/To split controls (below leaderboard, above chart)
 c1, c2 = st.columns(2)
