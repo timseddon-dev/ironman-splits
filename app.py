@@ -231,16 +231,8 @@ if not plot_df.empty:
     xy["gap_min_pos"] = ((xy["net_td"] - xy["leader_td"]).dt.total_seconds() / 60.0).clip(lower=0)
     xy["split_label"] = xy["split"].map(lambda s: friendly_label(s, split_km_map))
 
-    # Collect x-positions for vertical lines at SWIM and BIKE (if present in range)
-    vlines = []
-    for anchor in ["SWIM", "BIKE"]:
-        if anchor in xy["split"].unique():
-            # take first occurrence x position for the vertical line
-            sub = xy[xy["split"] == anchor]
-            if not sub.empty:
-                vlines.append(float(sub["leader_hr"].min()))
-
     fig = go.Figure()
+    # Main athlete lines
     for nm, g in xy.groupby("name", sort=False):
         g = g.sort_values("leader_hr")
         fig.add_trace(go.Scatter(
@@ -251,19 +243,17 @@ if not plot_df.empty:
             text=[nm]*len(g), meta=g["split_label"],
         ))
 
-    # End labels without boxes/lines (clean text only)
+    # End labels (no box)
     ends = (xy.sort_values(["name", "leader_hr"]).groupby("name", as_index=False).tail(1))
-    annotations = []
-    for _, r in ends.iterrows():
-        annotations.append(dict(
-            x=float(r["leader_hr"]),
-            y=float(r["gap_min_pos"]),
-            xref="x", yref="y",
-            text=str(r["name"]),
-            showarrow=False,
+    annotations = [
+        dict(
+            x=float(r["leader_hr"]), y=float(r["gap_min_pos"]),
+            xref="x", yref="y", text=str(r["name"]), showarrow=False,
             xanchor="left", yanchor="middle",
             font=dict(size=11, color="rgba(0,0,0,0.9)")
-        ))
+        )
+        for _, r in ends.iterrows()
+    ]
 
     # Axis ticks
     if len(xy):
@@ -272,6 +262,31 @@ if not plot_df.empty:
         x_ticks = [round(x_left + 0.5 * i, 2) for i in range(int((x_right - x_left) / 0.5) + 1)]
     else:
         x_ticks = []
+
+    # Compute vertical reference series at SWIM and BIKE
+    # Find leader elapsed (x) at those splits within the plotted range
+    ref_points = {}
+    for anchor in ["SWIM", "BIKE"]:
+        sub = xy[xy["split"] == anchor]
+        if not sub.empty:
+            ref_points[anchor] = float(sub["leader_hr"].min())
+
+    # Determine Y span for reference lines
+    y_min = 0.0
+    y_max = float(xy["gap_min_pos"].max()) if len(xy) else 1.0
+    y_max = max(y_max, 1.0)  # ensure visible
+
+    # Add reference lines as data series (two-point lines)
+    for anchor, x_val in ref_points.items():
+        fig.add_trace(go.Scatter(
+            x=[x_val, x_val],
+            y=[y_min, y_max],
+            mode="lines",
+            line=dict(color="rgba(0,0,0,0.5)", width=1, dash="dot"),
+            name=anchor,
+            showlegend=False,
+            hoverinfo="skip"
+        ))
 
     fig.update_xaxes(
         title="Leader elapsed (h)",
@@ -286,22 +301,10 @@ if not plot_df.empty:
         showline=True, mirror=True, ticks="outside"
     )
 
-    # Add vertical lines at SWIM and BIKE
-    shapes = []
-    for x_pos in vlines:
-        shapes.append(dict(
-            type="line",
-            xref="x", yref="paper",
-            x0=x_pos, x1=x_pos,
-            y0=0, y1=1,
-            line=dict(color="rgba(0,0,0,0.35)", width=1, dash="dot")
-        ))
-
     fig.update_layout(
         height=520,
         margin=dict(l=50, r=30, t=30, b=40),
-        annotations=annotations,
-        shapes=shapes
+        annotations=annotations
     )
     st.plotly_chart(fig, use_container_width=True)
 else:
