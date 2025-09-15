@@ -1,12 +1,24 @@
+import streamlit as st
+st.write("Boot: app.py loaded")
+
+try:
+    import plotly
+    st.write("Plotly version:", getattr(plotly, "__version__", "unknown"))
+    import plotly.graph_objects as go
+    import plotly.express as px  # only if you also use px; otherwise omit
+    st.write("Plotly imports OK")
+except Exception as e:
+    st.error("Plotly failed to import. Check requirements.txt and redeploy.")
+    st.exception(e)
+
 # app.py — bs4-free version (regex HTML parsing)
 import re
 import math
 import time
 from html import unescape
 import pandas as pd
-import streamlit as st
-import plotly.graph_objects as go
 import requests
+# keep `st` already imported above; you can remove this second import if you like
 
 # =========================
 # 0) Streamlit setup and cache reset
