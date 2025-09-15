@@ -13,7 +13,7 @@ st.set_page_config(page_title="Ironman tracker (WIP)", layout="wide", initial_si
 
 DATA_FILE = "long.csv"
 
-# 1) Split order definition (current static baseline; will be made dynamic next update)
+# 1) Split order definition (current static baseline; will be made dynamic next update) 
 ORDER = (
     ["START", "SWIM", "T1"] +
     [f"BIKE{i}" for i in range(1, 21)] + ["BIKE", "T2"] +
