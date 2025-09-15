@@ -183,81 +183,52 @@ else:
 
 
 
-# 6) Leaderboard display (scroll box without blank top space)
+
+# 6) Leaderboard display (scrolling table with checkboxes)
 latest["Latest split"] = latest["split"].map(lambda s: friendly_label(s, split_km_map))
 latest["Behind (min)"] = latest["gap_min"].map(lambda x: f"{x:.1f}")
 
-# Styles: tight rows, fixed-height scrollbox
-st.markdown("""
-    <style>
-    .lb-head, .lb-row {
-        display: grid;
-        grid-template-columns: 1.6fr 1.2fr 0.6fr 0.5fr;
-        column-gap: 12px;
-        align-items: center;
-    }
-    .lb-head {
-        position: sticky; top: 0; background: white; z-index: 5;
-        border-bottom: 1px solid rgba(0,0,0,0.2);
-        padding: 6px 0;
-    }
-    .lb-wrap {
-        height: 460px;           /* fixed viewport to force scrollbars */
-        overflow-y: auto;
-        padding-right: 8px;
-        border-bottom: 1px solid rgba(0,0,0,0.06);
-    }
-    .lb-row {
-        padding: 6px 0;
-        border-bottom: 1px solid rgba(0,0,0,0.06);
-        line-height: 1.0;
-    }
-    /* Remove default margins Streamlit may add around elements we place inside rows */
-    .lb-cell { margin: 0; padding: 0; }
-    .lb-wrap::-webkit-scrollbar { width: 10px; }
-    .lb-wrap::-webkit-scrollbar-thumb { background: rgba(0,0,0,0.3); border-radius: 6px; }
-    </style>
-""", unsafe_allow_html=True)
+# Prepare a compact dataframe for display
+tbl = latest[["name", "Latest split", "Behind (min)"]].rename(
+    columns={"name": "Athlete"}
+).reset_index(drop=True)
 
-# Header outside the scrollbox so it stays visible
-st.markdown('<div class="lb-head"><strong>Athlete</strong><strong>Latest split</strong><strong>Behind</strong><strong>Plot</strong></div>', unsafe_allow_html=True)
-
-# Initialize checkbox state
+# Initialize selection state
 if "plot_checks" not in st.session_state:
     st.session_state.plot_checks = {nm: False for nm in latest["name"]}
 
-# Ensure current leader is selected
+# Ensure current leader is always selected and locked
 leader_name = latest.iloc[0]["name"]
 st.session_state.plot_checks[leader_name] = True
 
-# Render up to N rows to guarantee scrolling; no st.columns inside rows
-RENDER_ROWS = min(len(latest), 120)
-st.markdown('<div class="lb-wrap">', unsafe_allow_html=True)
+# Add a Selection column reflecting session state
+tbl["Plot"] = tbl["Athlete"].map(lambda nm: st.session_state.plot_checks.get(nm, False))
 
-for _, r in latest.head(RENDER_ROWS).iterrows():
-    # Left three columns as HTML text
-    st.markdown(
-        f'<div class="lb-row">'
-        f'  <div class="lb-cell">{r["name"]}</div>'
-        f'  <div class="lb-cell">{r["Latest split"]}</div>'
-        f'  <div class="lb-cell">{r["Behind (min)"]}</div>'
-        f'  <div class="lb-cell" id="ck-{r["name"]}"></div>'
-        f'</div>',
-        unsafe_allow_html=True
-    )
-    # Then immediately render the checkbox; Streamlit will place it next in flow,
-    # but we zero margins via CSS so it aligns with the cell above.
-    ck_key = f"plot_{r['name']}"
-    checked = st.session_state.plot_checks.get(r["name"], False)
-    st.session_state.plot_checks[r["name"]] = st.checkbox(
-        "", value=True if r["name"] == leader_name else checked,
-        key=ck_key, disabled=(r["name"] == leader_name), label_visibility="hidden"
-    )
+# Render as a data editor with fixed height (shows scrollbar)
+edited = st.data_editor(
+    tbl,
+    hide_index=True,
+    column_config={
+        "Athlete": st.column_config.TextColumn("Athlete", width="large"),
+        "Latest split": st.column_config.TextColumn("Latest split", width="medium"),
+        "Behind (min)": st.column_config.TextColumn("Behind", width="small"),
+        "Plot": st.column_config.CheckboxColumn("Plot", help="Toggle to include in chart"),
+    },
+    disabled=("Athlete", "Latest split", "Behind (min)"),
+    height=460,              # forces vertical scrollbar
+    use_container_width=True,
+    key="leaderboard_editor",
+)
 
-st.markdown('</div>', unsafe_allow_html=True)
+# Persist selections back to session state (but keep leader locked on)
+for _, row in edited.iterrows():
+    nm = row["Athlete"]
+    want = bool(row["Plot"])
+    st.session_state.plot_checks[nm] = True if nm == leader_name else want
 
 # Selected athletes
 selected = [nm for nm, on in st.session_state.plot_checks.items() if on]
+
 
 # 7) From/To split controls (below leaderboard, above chart)
 c1, c2 = st.columns(2)
