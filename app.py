@@ -274,7 +274,12 @@ latest = latest.sort_values(
     ascending=[False, True, True]
 ).reset_index(drop=True)
 
-# 5.3) Leaderboard display (two-level header with merged group, fixed widths, inline selection)
+
+# 5.3) Leaderboard display (two-level header with merged group, fixed widths, inline selection via components.html)
+import json
+import html
+import streamlit.components.v1 as components
+
 st.subheader("Leaderboard")
 
 if latest.empty:
@@ -284,150 +289,186 @@ else:
     view = latest[["name", "Latest split", "Time behind leader", "Places_delta", "Gap_to_in_front_delta"]].copy()
     view = view.rename(columns={"name": "Athlete"})
 
-    # Read initial selections from query params (?sel=Name&sel=Name2)
+    # Read initial selections from query params
     qp = st.query_params
-    # st.query_params supports multi-values; in recent versions get_all exists
     selected_qp = set(qp.get_all("sel")) if hasattr(qp, "get_all") else set(qp.get("sel", []))
 
-    # Initialize selection state; ensure current leader is always selected
-    if "plot_checks" not in st.session_state:
-        leader_name = view.iloc[0]["Athlete"]
-        init = {nm: (nm in selected_qp) for nm in view["Athlete"]}
-        init[leader_name] = True
-        st.session_state.plot_checks = init
-    else:
-        leader_name = view.iloc[0]["Athlete"]
-        st.session_state.plot_checks[leader_name] = True
-
-    # CSS: fixed column widths, no wrapping, unified table layout
-    st.markdown("""
-        <style>
-        .lb-wrap { border: 1px solid rgba(0,0,0,0.08); border-radius: 6px; }
-        .lb-scroll { max-height: 460px; overflow-y: auto; }
-        table.lb { border-collapse: collapse; width: 100%; table-layout: fixed; font-size: 14px; }
-        table.lb th, table.lb td { padding: 8px; border-bottom: 1px solid rgba(0,0,0,0.06); vertical-align: middle; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-        table.lb thead th { position: sticky; top: 0; background: #fff; z-index: 2; border-bottom: 1px solid rgba(0,0,0,0.15); }
-        table.lb thead tr.top th { height: 28px; font-weight: 700; text-align: left; }
-        table.lb thead tr.bottom th { height: 28px; font-weight: 600; text-align: left; border-bottom: 1px solid rgba(0,0,0,0.08); }
-        /* Fixed widths per column to keep all rows aligned */
-        .col-athlete  { width: 26%; }
-        .col-latest   { width: 24%; }
-        .col-gap      { width: 16%; }
-        .col-places   { width: 12%; text-align: left; }
-        .col-gapfront { width: 14%; text-align: left; }
-        .col-plot     { width: 8%;  text-align: center; }
-        /* Pills and colors */
-        .pill-pos { display:inline-block; padding: 2px 8px; border-radius: 999px; background:#1aa260; color:#fff; font-weight:700; }
-        .pill-neg { display:inline-block; padding: 2px 8px; border-radius: 999px; background:#d93025; color:#fff; font-weight:700; }
-        .txt-pos  { color:#1aa260; font-weight:700; }
-        .txt-neg  { color:#d93025; font-weight:700; }
-        /* Inline checkbox styling */
-        .sel-box { transform: scale(1.2); cursor: pointer; }
-        </style>
-    """, unsafe_allow_html=True)
-
-    # Build table rows (checkbox inside the same cell)
-    rows_html = []
+    # Build row dicts with HTML-safe text
+    rows = []
     for nm, latest_split, gap_txt, places_delta, gap_delta in view.itertuples(index=False, name=None):
-        # Places pill
+        # Places pill rendering flags
         if pd.isna(places_delta):
-            places_html = ""
+            places = {"type": "none", "text": ""}
         else:
-            if places_delta > 0:
-                places_html = f'<span class="pill-pos">+{int(places_delta)}</span>'
-            elif places_delta < 0:
-                places_html = f'<span class="pill-neg">-{int(abs(places_delta))}</span>'
+            val = int(places_delta)
+            if val > 0:
+                places = {"type": "pos", "text": f"+{val}"}
+            elif val < 0:
+                places = {"type": "neg", "text": f"-{abs(val)}"}
             else:
-                places_html = "0"
+                places = {"type": "zero", "text": "0"}
 
-        # Gap-to-in-front delta
+        # Gap-to-front delta text
         if pd.isna(gap_delta):
-            gapfront_html = ""
+            gapfront = {"type": "none", "text": ""}
         else:
             if gap_delta > 0:
-                gapfront_html = f'<span class="txt-pos">+{gap_delta:.1f}</span>'
+                gapfront = {"type": "pos", "text": f"+{gap_delta:.1f}"}
             elif gap_delta < 0:
-                gapfront_html = f'<span class="txt-neg">{gap_delta:.1f}</span>'
+                gapfront = {"type": "neg", "text": f"{gap_delta:.1f}"}
             else:
-                gapfront_html = "0.0"
+                gapfront = {"type": "zero", "text": "0.0"}
 
-        checked = "checked" if st.session_state.plot_checks.get(nm, False) else ""
-        row = f"""
-            <tr>
-              <td class="col-athlete">{nm}</td>
-              <td class="col-latest">{latest_split}</td>
-              <td class="col-gap">{gap_txt}</td>
-              <td class="col-places">{places_html}</td>
-              <td class="col-gapfront">{gapfront_html}</td>
-              <td class="col-plot">
-                <input type="checkbox" class="sel-box" name="sel" value="{nm}" {checked} />
-              </td>
-            </tr>
-        """
-        rows_html.append(row)
+        rows.append({
+            "athlete": nm,
+            "latest": latest_split,
+            "gap": gap_txt,
+            "places": places,
+            "gapfront": gapfront,
+            "checked": bool(nm in selected_qp),
+        })
 
-    # Full table HTML with merged header cells:
-    # - Top row: merge col 1,2,3,6 with rowspan=2; group header (colspan=2) over cols 4-5
-    table_html = f"""
-    <div class="lb-wrap">
-      <form id="lb-form" method="get">
-        <div class="lb-scroll">
-          <table class="lb">
-            <thead>
-              <tr class="top">
-                <th class="col-athlete" rowspan="2">Athlete</th>
-                <th class="col-latest"  rowspan="2">Latest split</th>
-                <th class="col-gap"     rowspan="2">Time behind leader</th>
-                <th colspan="2" style="text-align:center;">Change since last split</th>
-                <th class="col-plot"    rowspan="2">Plot</th>
-              </tr>
-              <tr class="bottom">
-                <th class="col-places">Places</th>
-                <th class="col-gapfront">Gap to in front</th>
-              </tr>
-            </thead>
-            <tbody>
-              {''.join(rows_html)}
-            </tbody>
-          </table>
-        </div>
-      </form>
+    # Ensure leader is always selected
+    if rows:
+        leader_name = rows[0]["athlete"]
+        for r in rows:
+            if r["athlete"] == leader_name:
+                r["checked"] = True
+
+    # Template HTML (fully self-contained, no external deps)
+    html_payload = f"""
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<style>
+  :root {{
+    --border: rgba(0,0,0,0.08);
+    --border-strong: rgba(0,0,0,0.15);
+    --pos: #1aa260;
+    --neg: #d93025;
+  }}
+  body {{ margin: 0; font-family: -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Arial, sans-serif; }}
+  .wrap {{ border: 1px solid var(--border); border-radius: 6px; }}
+  .scroll {{ max-height: 460px; overflow-y: auto; }}
+  table.lb {{ border-collapse: collapse; width: 100%; table-layout: fixed; font-size: 14px; }}
+  table.lb th, table.lb td {{ padding: 8px; border-bottom: 1px solid var(--border); vertical-align: middle; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
+  thead th {{ position: sticky; top: 0; background: #fff; z-index: 2; border-bottom: 1px solid var(--border-strong); }}
+  thead tr.top th {{ height: 28px; font-weight: 700; text-align: left; }}
+  thead tr.bottom th {{ height: 28px; font-weight: 600; text-align: left; border-bottom: 1px solid var(--border); }}
+  .col-athlete  {{ width: 26%; }}
+  .col-latest   {{ width: 24%; }}
+  .col-gap      {{ width: 16%; }}
+  .col-places   {{ width: 12%; text-align: left; }}
+  .col-gapfront {{ width: 14%; text-align: left; }}
+  .col-plot     {{ width: 8%;  text-align: center; }}
+  .pill {{ display:inline-block; padding: 2px 8px; border-radius: 999px; color:#fff; font-weight:700; }}
+  .pill.pos {{ background: var(--pos); }}
+  .pill.neg {{ background: var(--neg); }}
+  .txt.pos {{ color: var(--pos); font-weight:700; }}
+  .txt.neg {{ color: var(--neg); font-weight:700; }}
+  .sel-box {{ transform: scale(1.2); cursor: pointer; }}
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="scroll">
+      <table class="lb" aria-label="Leaderboard">
+        <thead>
+          <tr class="top">
+            <th class="col-athlete" rowspan="2">Athlete</th>
+            <th class="col-latest"  rowspan="2">Latest split</th>
+            <th class="col-gap"     rowspan="2">Time behind leader</th>
+            <th colspan="2" style="text-align:center;">Change since last split</th>
+            <th class="col-plot"    rowspan="2">Plot</th>
+          </tr>
+          <tr class="bottom">
+            <th class="col-places">Places</th>
+            <th class="col-gapfront">Gap to in front</th>
+          </tr>
+        </thead>
+        <tbody id="rows">
+        </tbody>
+      </table>
     </div>
-    <script>
-      // Auto-update URL query params on checkbox change to persist selection
-      const form = document.getElementById('lb-form');
-      if (form) {{
-        form.addEventListener('change', () => {{
-          const boxes = form.querySelectorAll('input[name="sel"]');
-          const sel = [];
-          boxes.forEach(b => {{ if (b.checked) sel.push(b.value); }});
-          const url = new URL(window.location);
-          url.searchParams.delete('sel');
-          sel.forEach(v => url.searchParams.append('sel', v));
-          window.history.replaceState(null, '', url.toString());
-          // Trigger rerun by reloading
-          window.location.assign(url.toString());
-        }});
+  </div>
+  <script>
+    const data = {json.dumps(rows, ensure_ascii=False)};
+    const rowsEl = document.getElementById('rows');
+
+    function pillHTML(p) {{
+      if (!p || p.type === 'none') return '';
+      if (p.type === 'pos') return `<span class="pill pos">${{p.text}}</span>`;
+      if (p.type === 'neg') return `<span class="pill neg">${{p.text}}</span>`;
+      if (p.type === 'zero') return '0';
+      return '';
+    }}
+
+    function gapHTML(g) {{
+      if (!g || g.type === 'none') return '';
+      if (g.type === 'pos') return `<span class="txt pos">${{g.text}}</span>`;
+      if (g.type === 'neg') return `<span class="txt neg">${{g.text}}</span>`;
+      if (g.type === 'zero') return '0.0';
+      return '';
+    }}
+
+    function render() {{
+      rowsEl.innerHTML = '';
+      for (const r of data) {{
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td class="col-athlete">${{r.athlete}}</td>
+          <td class="col-latest">${{r.latest}}</td>
+          <td class="col-gap">${{r.gap}}</td>
+          <td class="col-places">${{pillHTML(r.places)}}</td>
+          <td class="col-gapfront">${{gapHTML(r.gapfront)}}</td>
+          <td class="col-plot">
+            <input type="checkbox" class="sel-box" name="sel" value="${{r.athlete}}" ${r.checked ? 'checked' : ''} />
+          </td>
+        `;
+        rowsEl.appendChild(tr);
       }}
-    </script>
+    }}
+
+    function updateQueryParams(selected) {{
+      const url = new URL(window.location);
+      url.searchParams.delete('sel');
+      for (const v of selected) url.searchParams.append('sel', v);
+      window.history.replaceState(null, '', url.toString());
+      // Ask Streamlit to rerun by posting location change
+      window.parent.postMessage({{type: 'streamlit:rerun'}}, '*');
+    }}
+
+    document.addEventListener('change', (e) => {{
+      if (e.target && e.target.matches('input.sel-box')) {{
+        const boxes = Array.from(document.querySelectorAll('input.sel-box'));
+        const selected = boxes.filter(b => b.checked).map(b => b.value);
+        updateQueryParams(selected);
+      }}
+    }});
+
+    render();
+  </script>
+</body>
+</html>
     """
 
-    st.markdown(table_html, unsafe_allow_html=True)
+    # Render the component (height set to fit table and header)
+    components.html(html_payload, height=520, scrolling=False)
 
-    # After render, read query params to produce selected list for plotting and sync session_state
+    # Read current selected names from query params to sync with Streamlit state
     qp = st.query_params
     selected_names = set(qp.get_all("sel")) if hasattr(qp, "get_all") else set(qp.get("sel", []))
 
     # Ensure leader always included
-    leader_name = view.iloc[0]["Athlete"]
-    if leader_name not in selected_names:
-        selected_names = set(selected_names) | {leader_name}
-        st.query_params["sel"] = list(selected_names)
+    if rows:
+        leader_name = rows[0]["athlete"]
+        if leader_name not in selected_names:
+            selected_names.add(leader_name)
+            st.query_params["sel"] = list(selected_names)
 
-    # Update session state
-    st.session_state.plot_checks = {nm: (nm in selected_names) for nm in view["Athlete"]}
+    st.session_state.plot_checks = {r["athlete"]: (r["athlete"] in selected_names) for r in rows}
     selected = [nm for nm, on in st.session_state.plot_checks.items() if on]
-
 # 6) Plot controls
 splits_present = list(df["split"].cat.categories)
 c1, c2 = st.columns(2)
