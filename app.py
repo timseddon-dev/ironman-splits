@@ -272,18 +272,18 @@ else:
     view = latest[["name", "Latest split", "Time behind leader", "Places_delta", "Gap_to_in_front_delta"]].copy()
     view = view.rename(columns={"name": "Athlete"})
 
-    # Persist selections in query params for stability across reruns
-    qp = st.experimental_get_query_params()
-    selected_qp = set(qp.get("sel", []))  # list of names in query params
+    # Read initial selections from query params (?sel=Name&sel=Name2)
+    qp = st.query_params
+    selected_qp = set(qp.get_all("sel")) if hasattr(qp, "get_all") else set(qp.get("sel", []))
+
+    # Initialize selection state; ensure current leader is always selected
     if "plot_checks" not in st.session_state:
-        # Initialize from query params; ensure current leader is always selected
+        leader_name = view.iloc[0]["Athlete"]
         init = {nm: (nm in selected_qp) for nm in view["Athlete"]}
-        leader_name = latest.iloc[0]["Athlete"] if "Athlete" in latest.columns else latest.iloc[0]["name"]
         init[leader_name] = True
         st.session_state.plot_checks = init
     else:
-        # Ensure leader stays selected
-        leader_name = latest.iloc[0]["Athlete"] if "Athlete" in latest.columns else latest.iloc[0]["name"]
+        leader_name = view.iloc[0]["Athlete"]
         st.session_state.plot_checks[leader_name] = True
 
     # CSS: fixed column widths, no wrapping, unified table layout
@@ -313,8 +313,7 @@ else:
         </style>
     """, unsafe_allow_html=True)
 
-    # Build header and rows as pure HTML so the checkbox is inside the same row
-    # We’ll emit a form with checkboxes named sel and submit it via JS on change to keep Streamlit state in sync.
+    # Build table rows (checkbox inside the same cell)
     rows_html = []
     for nm, latest_split, gap_txt, places_delta, gap_delta in view.itertuples(index=False, name=None):
         # Places pill
@@ -382,23 +381,19 @@ else:
       </form>
     </div>
     <script>
-      // Auto-submit selection via query params on change
+      // Auto-update URL query params on checkbox change to persist selection
       const form = document.getElementById('lb-form');
       if (form) {{
-        form.addEventListener('change', (e) => {{
+        form.addEventListener('change', () => {{
           const boxes = form.querySelectorAll('input[name="sel"]');
-          const vals = [];
-          boxes.forEach(b => {{ if (b.checked) vals.push(b.value); }});
+          const sel = [];
+          boxes.forEach(b => {{ if (b.checked) sel.push(b.value); }});
           const url = new URL(window.location);
           url.searchParams.delete('sel');
-          vals.forEach(v => url.searchParams.append('sel', v));
+          sel.forEach(v => url.searchParams.append('sel', v));
           window.history.replaceState(null, '', url.toString());
-          // Trigger a Streamlit rerun by programmatically clicking the hidden anchor
-          const anchor = document.createElement('a');
-          anchor.href = url.toString();
-          document.body.appendChild(anchor);
-          anchor.click();
-          document.body.removeChild(anchor);
+          // Trigger rerun by reloading (keeps scroll in container minimal)
+          window.location.assign(url.toString());
         }});
       }}
     </script>
@@ -407,15 +402,18 @@ else:
     st.markdown(table_html, unsafe_allow_html=True)
 
     # After render, read query params to produce selected list for plotting and sync session_state
-    qp = st.experimental_get_query_params()
-    selected_names = qp.get("sel", [])
+    qp = st.query_params
+    selected_names = set(qp.get_all("sel")) if hasattr(qp, "get_all") else set(qp.get("sel", []))
+
     # Ensure leader always included
-    leader_name = latest.iloc[0]["Athlete"] if "Athlete" in latest.columns else latest.iloc[0]["name"]
+    leader_name = view.iloc[0]["Athlete"]
     if leader_name not in selected_names:
-        selected_names = list(selected_names) + [leader_name]
-        st.experimental_set_query_params(sel=selected_names)
+        selected_names = set(selected_names) | {leader_name}
+        # Write back to query params
+        st.query_params["sel"] = list(selected_names)
+
     # Update session state
-    st.session_state.plot_checks = {nm: (nm in set(selected_names)) for nm in view["Athlete"]}
+    st.session_state.plot_checks = {nm: (nm in selected_names) for nm in view["Athlete"]}
     selected = [nm for nm, on in st.session_state.plot_checks.items() if on]
 
 # 6) From/To split controls
