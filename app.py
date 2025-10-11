@@ -260,6 +260,12 @@ latest = latest.sort_values(
     ascending=[False, True, True]
 ).reset_index(drop=True)
 
+
+Good catch — that’s a typo in Section 5.3 when initializing plot_checks. Here is a corrected full replacement for Section 5.3 only.
+
+Replace your entire Section 5.3 with the block below.
+
+```python
 # 5.3) Leaderboard display (two-level header with merged group and styling)
 st.subheader("Leaderboard")
 
@@ -291,8 +297,9 @@ else:
         </style>
     """, unsafe_allow_html=True)
 
+    # Initialize selection state
     if "plot_checks" not in st.session_state:
-        st.session_state.plot_checks = {nm: False for nm in latest["Athlete"]] if "Athlete" in latest.columns else {nm: False for nm in latest["name"]}
+        st.session_state.plot_checks = {nm: False for nm in view["Athlete"]}
 
     leader_name = latest.iloc[0]["name"]
     st.session_state.plot_checks[leader_name] = True
@@ -366,7 +373,6 @@ else:
             unsafe_allow_html=True
         )
 
-        # Maintain checkbox selection state per athlete
         ck_key = f"plot_{nm}"
         current = st.session_state.plot_checks.get(nm, False)
         st.session_state.plot_checks[nm] = True if nm == leader_name else current
@@ -377,6 +383,11 @@ else:
     selected = [nm for nm, on in st.session_state.plot_checks.items() if on]
 ```
 
+Changes made:
+- Fixed the bracket typo when initializing st.session_state.plot_checks.
+- Also simplified initialization to use the already-renamed view["Athlete"].
+
+If anything else errors, send the exact section number and line, and I’ll replace that whole section accordingly.
 
 
 # 6) From/To split controls
