@@ -138,15 +138,7 @@ split_km_map = build_split_distance_map(df)
 
 st.title("Live Gaps vs Leader")
 
-Understood. I’ll provide a complete replacement for the affected numbered sections only.
 
-Replacing Sections: 5 and 5.3
-- 5: Leaderboard data preparation (includes 5.1, 5.2, 5.2.1, 5.2.2, 5.2.3)
-- 5.3: Leaderboard display
-
-Paste these sections over your current Sections 5 and 5.3 exactly as below.
-
-```python
 # 5) Leaderboard data preparation
 
 # 5.1) Compute per-split leader times (minimum net time at each split)
