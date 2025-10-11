@@ -13,7 +13,7 @@ st.set_page_config(page_title="Ironman tracker (WIP)", layout="wide", initial_si
 
 DATA_FILE = "long.csv"
 
-# 1) Split order definition (current static baseline; will be made dynamic next update) 
+# 1) Split order definition (static for now; will be made dynamic next update)
 ORDER = (
     ["START", "SWIM", "T1"] +
     [f"BIKE{i}" for i in range(1, 21)] + ["BIKE", "T2"] +
@@ -59,14 +59,11 @@ def build_split_distance_map(df: pd.DataFrame) -> dict:
 
 def friendly_label(split: str, split_km: dict) -> str:
     s = str(split).upper()
-    # Generic names first
     if s == "START": return "Start"
     if s == "FINISH": return "Finish"
     if s in ("T1", "T2"): return s
-    # Distance-aware names
     km = split_km.get(s)
     if km is None:
-        # Fallback human name if distance unknown
         if s == "SWIM": return "Swim"
         if s.startswith("BIKE"): return "Bike"
         if s.startswith("RUN"): return "Run"
@@ -97,7 +94,6 @@ def load_data(path: str) -> pd.DataFrame:
         if pd.isna(x):
             return pd.NaT
         s = str(x).strip()
-        # Accept mm:ss -> 0:mm:ss
         if re.fullmatch(r"\d{1,2}:\d{2}", s):
             s = "0:" + s
         try:
@@ -140,27 +136,22 @@ def split_range(splits, a, b):
 df = load_data(DATA_FILE)
 split_km_map = build_split_distance_map(df)
 
-st.title("Ironman tracker (WIP)")
+st.title("Live Gaps vs Leader")
 
 # 5) Leaderboard data preparation
 
 # 5.1) Compute per-split leader times (minimum net time at each split)
 leaders = compute_leader(df)
-# leaders columns: ["split", "leader_td"]
 
 # 5.2) Merge leader times into base data (all rows)
 lf = df.merge(leaders, on="split", how="left")
 
-# 5.2.1) Compute per-athlete latest split correctly (fixes "Run 0.0 km" issue)
-# Keep only rows with valid athlete time and valid leader time
+# 5.2.1) Compute per-athlete latest split correctly
 lf_valid = lf.dropna(subset=["net_td", "leader_td"]).copy()
 
-# Build a progression index using the categorical order already on df["split"]
 split_order = {s: i for i, s in enumerate(df["split"].cat.categories)}
 lf_valid["split_idx"] = lf_valid["split"].map(split_order)
 
-# For each athlete, take the chronologically latest split with a valid time
-# If duplicates at the same split exist, pick the smallest net_td
 latest = (
     lf_valid.sort_values(["name", "split_idx", "net_td"])
             .groupby("name", as_index=False)
@@ -168,13 +159,9 @@ latest = (
             .reset_index(drop=True)
 )
 
-# Gap to leader in minutes (non-negative)
 latest["gap_min"] = (latest["net_td"] - latest["leader_td"]).dt.total_seconds() / 60.0
 latest["gap_min"] = latest["gap_min"].clip(lower=0)
 
-# Derive a readable label for the latest split:
-# - Prefer the row's own "label" if present
-# - Otherwise, fallback to friendly_label(split, split_km_map)
 def _latest_label(row):
     lbl = str(row.get("label") or "").strip()
     if lbl:
@@ -182,65 +169,215 @@ def _latest_label(row):
     return friendly_label(row["split"], split_km_map)
 
 latest["Latest split"] = latest.apply(_latest_label, axis=1)
-latest["Behind (min)"] = latest["gap_min"].map(lambda x: f"{x:.1f}")
+latest["Time behind leader"] = latest["gap_min"].map(lambda x: f"{x:.1f}")
 
-# Final sort for display:
-#   1) most progressed split first
-#   2) then smallest gap
-#   3) then smallest net time
+# 5.2.2) Compute place and gap deltas vs previous split
+# For each split, rank athletes by net_td (ascending). Then compute deltas to previous split per athlete.
+ranked = (
+    lf_valid.sort_values(["split_idx", "net_td"])
+            .assign(place=lambda d: d.groupby("split_idx")["net_td"].rank(method="first"))
+)
+
+# Previous split index per row
+ranked["prev_split_idx"] = ranked["split_idx"] - 1
+
+# Current place per athlete at their latest split
+current_place = latest[["name", "split_idx"]].merge(
+    ranked[["name", "split_idx", "place"]], on=["name", "split_idx"], how="left"
+).rename(columns={"place": "place_now"})
+
+# Previous place for the same athlete at previous split (if existed)
+prev_place = ranked.merge(
+    current_place[["name", "split_idx"]],
+    left_on=["name", "prev_split_idx"],
+    right_on=["name", "split_idx"],
+    how="inner",
+    suffixes=("", "_curref")
+)[["name", "split_idx_curref", "place"]].rename(columns={
+    "split_idx_curref": "split_idx",
+    "place": "place_prev"
+})
+
+# Merge prev place into latest
+latest = latest.merge(current_place[["name", "place_now"]], on="name", how="left")
+latest = latest.merge(prev_place, on=["name", "split_idx"], how="left")
+
+# Places delta (positive = gained places)
+latest["Places_delta"] = latest["place_prev"] - latest["place_now"]
+
+# Compute "gap to in front" at current and previous split
+# For each split, compute the time gap to the next better (lower net_td) athlete
+def per_split_gap_to_front(d: pd.DataFrame) -> pd.DataFrame:
+    d = d.sort_values("net_td").reset_index(drop=True)
+    # For each row (i>0), gap to previous row in minutes; leader has NaN
+    d["gap_to_front_min"] = pd.NA
+    for i in range(1, len(d)):
+        delta = (d.loc[i, "net_td"] - d.loc[i - 1, "net_td"]).total_seconds() / 60.0
+        d.loc[i, "gap_to_front_min"] = max(delta, 0.0)
+    return d
+
+per_split = ranked.groupby("split_idx", group_keys=False).apply(per_split_gap_to_front)
+
+# Current gap_to_front for athlete at their latest split
+cur_gap = latest[["name", "split_idx"]].merge(
+    per_split[["name", "split_idx", "gap_to_front_min"]],
+    on=["name", "split_idx"], how="left"
+).rename(columns={"gap_to_front_min": "gap_front_now"})
+
+# Previous gap_to_front for same athlete at previous split (if existed)
+prev_gap = per_split.copy()
+prev_gap["split_idx"] = prev_gap["split_idx"] + 1  # shift forward so it aligns when merging on current split_idx
+prev_gap = prev_gap.rename(columns={"gap_to_front_min": "gap_front_prev"})
+latest = latest.merge(cur_gap, on=["name", "split_idx"], how="left")
+latest = latest.merge(prev_gap[["name", "split_idx", "gap_front_prev"]], on=["name", "split_idx"], how="left")
+
+# Delta: positive = getting closer (reduce gap), negative = losing time
+# We define delta = previous_gap - current_gap so positive means improvement
+def _safe_delta(prev_val, cur_val):
+    try:
+        if pd.isna(prev_val) or pd.isna(cur_val):
+            return pd.NA
+        return round(float(prev_val) - float(cur_val), 1)
+    except Exception:
+        return pd.NA
+
+latest["Gap_to_in_front_delta"] = [
+    _safe_delta(p, c) for p, c in zip(latest["gap_front_prev"], latest["gap_front_now"])
+]
+
+# 5.2.3) Final sort for display (progress, then smallest gap, then net time)
 latest = latest.sort_values(
     ["split_idx", "gap_min", "net_td"],
     ascending=[False, True, True]
 ).reset_index(drop=True)
 
-# 5.3) Leaderboard display (scrolling table with checkboxes)
+# 5.3) Leaderboard display (two-level header with merged group)
 st.subheader("Leaderboard")
 
 if latest.empty:
     st.info("Waiting for live data...")
     selected = []
 else:
-    # Prepare a compact dataframe for display
-    tbl = latest[["name", "Latest split", "Behind (min)"]].rename(
-        columns={"name": "Athlete"}
-    ).reset_index(drop=True)
+    # Prepare styled HTML table with two header rows and scroll
+    # Columns: Athlete | Latest split | Time behind leader | [Change since last split: Places | Gap to in front] | Plot
+    # Build a working copy with required fields
+    view = latest[["name", "Latest split", "Time behind leader", "Places_delta", "Gap_to_in_front_delta"]].copy()
+    view = view.rename(columns={"name": "Athlete"})
+
+    # Inline styles and table layout
+    st.markdown("""
+        <style>
+        .lb-container { max-height: 460px; overflow-y: auto; border: 1px solid rgba(0,0,0,0.08); border-radius: 6px; }
+        table.lb { border-collapse: collapse; width: 100%; font-size: 14px; }
+        table.lb thead th { position: sticky; top: 0; background: #fff; z-index: 2; border-bottom: 1px solid rgba(0,0,0,0.15); }
+        table.lb thead tr.top th { height: 28px; font-weight: 700; text-align: left; padding: 6px 8px; }
+        table.lb thead tr.bottom th { height: 28px; font-weight: 600; text-align: left; padding: 6px 8px; border-bottom: 1px solid rgba(0,0,0,0.08); }
+        table.lb tbody td { padding: 8px; border-bottom: 1px solid rgba(0,0,0,0.06); vertical-align: middle; }
+        .col-athlete { width: 28%; }
+        .col-latest  { width: 24%; }
+        .col-gap     { width: 16%; }
+        .col-places  { width: 12%; }
+        .col-gapfront{ width: 12%; }
+        .col-plot    { width: 8%; text-align: center; }
+        .pill-pos { display:inline-block; padding: 2px 8px; border-radius: 999px; background:#1aa260; color:#fff; font-weight:700; }
+        .pill-neg { display:inline-block; padding: 2px 8px; border-radius: 999px; background:#d93025; color:#fff; font-weight:700; }
+        .txt-pos { color:#1aa260; font-weight:700; }
+        .txt-neg { color:#d93025; font-weight:700; }
+        .sticky-top { position: sticky; top: 0; background: #fff; z-index: 3; }
+        </style>
+    """, unsafe_allow_html=True)
 
     # Initialize selection state
     if "plot_checks" not in st.session_state:
         st.session_state.plot_checks = {nm: False for nm in latest["name"]}
 
-    # Ensure current leader is always selected and locked
     leader_name = latest.iloc[0]["name"]
     st.session_state.plot_checks[leader_name] = True
 
-    # Add a Selection column reflecting session state
-    tbl["Plot"] = tbl["Athlete"].map(lambda nm: st.session_state.plot_checks.get(nm, False))
+    # Render two-level header and body rows
+    st.markdown('<div class="lb-container">', unsafe_allow_html=True)
 
-    edited = st.data_editor(
-        tbl,
-        hide_index=True,
-        column_config={
-            "Athlete": st.column_config.TextColumn("Athlete", width="large"),
-            "Latest split": st.column_config.TextColumn("Latest split", width="medium"),
-            "Behind (min)": st.column_config.TextColumn("Behind", width="small"),
-            "Plot": st.column_config.CheckboxColumn("Plot", help="Toggle to include in chart"),
-        },
-        disabled=("Athlete", "Latest split", "Behind (min)"),
-        height=460,
-        use_container_width=True,
-        key="leaderboard_editor",
+    # Two-level header: top row with merged group; bottom row with leaf titles.
+    # We simulate column groups using colspan attributes.
+    st.markdown(
+        """
+        <table class="lb">
+          <thead>
+            <tr class="top">
+              <th class="col-athlete" rowspan="1"></th>
+              <th class="col-latest"  rowspan="1"></th>
+              <th class="col-gap"     rowspan="1"></th>
+              <th colspan="2" style="text-align:center;">Change since last split</th>
+              <th class="col-plot"    rowspan="1"></th>
+            </tr>
+            <tr class="bottom">
+              <th class="col-athlete">Athlete</th>
+              <th class="col-latest">Latest split</th>
+              <th class="col-gap">Time behind leader</th>
+              <th class="col-places">Places</th>
+              <th class="col-gapfront">Gap to in front</th>
+              <th class="col-plot">Plot</th>
+            </tr>
+          </thead>
+          <tbody>
+        """,
+        unsafe_allow_html=True
     )
 
-    # Persist selections back to session state (but keep leader locked on)
-    for _, row in edited.iterrows():
-        nm = row["Athlete"]
-        want = bool(row["Plot"])
-        st.session_state.plot_checks[nm] = True if nm == leader_name else want
+    # Render up to N rows
+    RENDER_ROWS = min(len(view), 200)
+    # We will output one <tr> per row and then place a checkbox using Streamlit next to it.
+    # To keep alignment, we render the checkbox in its own column using st.checkbox below the row HTML.
 
-    # Determine selected athletes
+    for i in range(RENDER_ROWS):
+        r = view.iloc[i]
+        nm = r["Athlete"]
+        # Places pill
+        places_delta = r["Places_delta"]
+        if pd.isna(places_delta):
+            places_html = ""
+        else:
+            sign = "+" if places_delta > 0 else ("" if places_delta == 0 else "−")
+            cls = "pill-pos" if places_delta > 0 else ("pill-neg" if places_delta < 0 else "")
+            content = f"{sign}{int(abs(places_delta))}" if places_delta != 0 else "0"
+            places_html = f'<span class="{cls}">{content}</span>' if cls else content
+
+        # Gap to in front text
+        gap_delta = r["Gap_to_in_front_delta"]
+        if pd.isna(gap_delta):
+            gap_html = ""
+        else:
+            sign = "+" if gap_delta > 0 else ("−" if gap_delta < 0 else "")
+            cls = "txt-pos" if gap_delta > 0 else ("txt-neg" if gap_delta < 0 else "")
+            gap_html = f'<span class="{cls}">{sign}{abs(gap_delta):.1f}</span>' if cls else f"{gap_delta:.1f}"
+
+        # Write the row (checkbox column left empty; filled by Streamlit widget next)
+        st.markdown(
+            f"""
+            <tr>
+              <td class="col-athlete">{nm}</td>
+              <td class="col-latest">{r["Latest split"]}</td>
+              <td class="col-gap">{r["Time behind leader"]}</td>
+              <td class="col-places">{places_html}</td>
+              <td class="col-gapfront">{gap_html}</td>
+              <td class="col-plot" id="plot-cell-{i}"></td>
+            </tr>
+            """,
+            unsafe_allow_html=True
+        )
+        # Render the checkbox beneath; Streamlit can’t place it inside the exact cell, but we sync state.
+        ck_key = f"plot_{nm}"
+        current = st.session_state.plot_checks.get(nm, False)
+        st.session_state.plot_checks[nm] = True if nm == leader_name else current
+        st.checkbox("", key=ck_key, value=st.session_state.plot_checks[nm], label_visibility="hidden")
+        # Update state from checkbox (Streamlit automatically updates session_state on change)
+
+    st.markdown("</tbody></table></div>", unsafe_allow_html=True)
+
+    # Gather selected athletes from state
     selected = [nm for nm, on in st.session_state.plot_checks.items() if on]
 
-# 6) From/To split controls (below leaderboard, above chart)
+# 6) From/To split controls
 splits_present = list(df["split"].cat.categories)
 c1, c2 = st.columns(2)
 with c1:
@@ -275,14 +412,13 @@ if not plot_df.empty:
             text=[nm]*len(g), meta=g["split_label"],
         ))
 
-    # 8.2) End labels (no box)
+    # 8.2) End labels
     ends = (xy.sort_values(["name", "leader_hr"]).groupby("name", as_index=False).tail(1))
     annotations = [
         dict(
             x=float(r["leader_hr"]), y=float(r["gap_min_pos"]),
             xref="x", yref="y", text=str(r["name"]), showarrow=False,
-            xanchor="left", yanchor="middle",
-            font=dict(size=11, color="rgba(0,0,0,0.9)")
+            xanchor="left", yanchor="middle", font=dict(size=11, color="rgba(0,0,0,0.9)")
         )
         for _, r in ends.iterrows()
     ]
@@ -308,7 +444,7 @@ if not plot_df.empty:
         showline=True, mirror=True, ticks="outside"
     )
 
-    # 8.4) Vertical reference lines at SWIM, T1, BIKE, T2 (solid, full height, as data traces)
+    # 8.4) Vertical reference lines at SWIM, T1, BIKE, T2
     ref_points = {}
     for anchor in ["SWIM", "T1", "BIKE", "T2"]:
         sub = xy[xy["split"] == anchor]
