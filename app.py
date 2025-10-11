@@ -275,9 +275,10 @@ latest = latest.sort_values(
 ).reset_index(drop=True)
 
 
+
+
 # 5.3) Leaderboard display (two-level header with merged group, fixed widths, inline selection via components.html)
 import json
-import html
 import streamlit.components.v1 as components
 
 st.subheader("Leaderboard")
@@ -293,10 +294,10 @@ else:
     qp = st.query_params
     selected_qp = set(qp.get_all("sel")) if hasattr(qp, "get_all") else set(qp.get("sel", []))
 
-    # Build row dicts with HTML-safe text
+    # Build row dicts for JS (no HTML here)
     rows = []
     for nm, latest_split, gap_txt, places_delta, gap_delta in view.itertuples(index=False, name=None):
-        # Places pill rendering flags
+        # Places pill semantics
         if pd.isna(places_delta):
             places = {"type": "none", "text": ""}
         else:
@@ -308,7 +309,7 @@ else:
             else:
                 places = {"type": "zero", "text": "0"}
 
-        # Gap-to-front delta text
+        # Gap-to-front delta semantics
         if pd.isna(gap_delta):
             gapfront = {"type": "none", "text": ""}
         else:
@@ -320,9 +321,9 @@ else:
                 gapfront = {"type": "zero", "text": "0.0"}
 
         rows.append({
-            "athlete": nm,
-            "latest": latest_split,
-            "gap": gap_txt,
+            "athlete": str(nm),
+            "latest": str(latest_split),
+            "gap": str(gap_txt),
             "places": places,
             "gapfront": gapfront,
             "checked": bool(nm in selected_qp),
@@ -335,39 +336,41 @@ else:
             if r["athlete"] == leader_name:
                 r["checked"] = True
 
-    # Template HTML (fully self-contained, no external deps)
-    html_payload = f"""
+    rows_json = json.dumps(rows, ensure_ascii=False)
+
+    # Use a plain triple-quoted string (NOT an f-string) so JS ${...} is untouched
+    html_payload = """
 <!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8" />
 <style>
-  :root {{
+  :root {
     --border: rgba(0,0,0,0.08);
     --border-strong: rgba(0,0,0,0.15);
     --pos: #1aa260;
     --neg: #d93025;
-  }}
-  body {{ margin: 0; font-family: -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Arial, sans-serif; }}
-  .wrap {{ border: 1px solid var(--border); border-radius: 6px; }}
-  .scroll {{ max-height: 460px; overflow-y: auto; }}
-  table.lb {{ border-collapse: collapse; width: 100%; table-layout: fixed; font-size: 14px; }}
-  table.lb th, table.lb td {{ padding: 8px; border-bottom: 1px solid var(--border); vertical-align: middle; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
-  thead th {{ position: sticky; top: 0; background: #fff; z-index: 2; border-bottom: 1px solid var(--border-strong); }}
-  thead tr.top th {{ height: 28px; font-weight: 700; text-align: left; }}
-  thead tr.bottom th {{ height: 28px; font-weight: 600; text-align: left; border-bottom: 1px solid var(--border); }}
-  .col-athlete  {{ width: 26%; }}
-  .col-latest   {{ width: 24%; }}
-  .col-gap      {{ width: 16%; }}
-  .col-places   {{ width: 12%; text-align: left; }}
-  .col-gapfront {{ width: 14%; text-align: left; }}
-  .col-plot     {{ width: 8%;  text-align: center; }}
-  .pill {{ display:inline-block; padding: 2px 8px; border-radius: 999px; color:#fff; font-weight:700; }}
-  .pill.pos {{ background: var(--pos); }}
-  .pill.neg {{ background: var(--neg); }}
-  .txt.pos {{ color: var(--pos); font-weight:700; }}
-  .txt.neg {{ color: var(--neg); font-weight:700; }}
-  .sel-box {{ transform: scale(1.2); cursor: pointer; }}
+  }
+  body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Arial, sans-serif; }
+  .wrap { border: 1px solid var(--border); border-radius: 6px; }
+  .scroll { max-height: 460px; overflow-y: auto; }
+  table.lb { border-collapse: collapse; width: 100%; table-layout: fixed; font-size: 14px; }
+  table.lb th, table.lb td { padding: 8px; border-bottom: 1px solid var(--border); vertical-align: middle; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  thead th { position: sticky; top: 0; background: #fff; z-index: 2; border-bottom: 1px solid var(--border-strong); }
+  thead tr.top th { height: 28px; font-weight: 700; text-align: left; }
+  thead tr.bottom th { height: 28px; font-weight: 600; text-align: left; border-bottom: 1px solid var(--border); }
+  .col-athlete  { width: 26%; }
+  .col-latest   { width: 24%; }
+  .col-gap      { width: 16%; }
+  .col-places   { width: 12%; text-align: left; }
+  .col-gapfront { width: 14%; text-align: left; }
+  .col-plot     { width: 8%;  text-align: center; }
+  .pill { display:inline-block; padding: 2px 8px; border-radius: 999px; color:#fff; font-weight:700; }
+  .pill.pos { background: var(--pos); }
+  .pill.neg { background: var(--neg); }
+  .txt.pos { color: var(--pos); font-weight:700; }
+  .txt.neg { color: var(--neg); font-weight:700; }
+  .sel-box { transform: scale(1.2); cursor: pointer; }
 </style>
 </head>
 <body>
@@ -387,80 +390,76 @@ else:
             <th class="col-gapfront">Gap to in front</th>
           </tr>
         </thead>
-        <tbody id="rows">
-        </tbody>
+        <tbody id="rows"></tbody>
       </table>
     </div>
   </div>
   <script>
-    const data = {json.dumps(rows, ensure_ascii=False)};
-    const rowsEl = document.getElementById('rows');
+    const data = __ROWS_JSON__;
 
-    function pillHTML(p) {{
+    function pillHTML(p) {
       if (!p || p.type === 'none') return '';
-      if (p.type === 'pos') return `<span class="pill pos">${{p.text}}</span>`;
-      if (p.type === 'neg') return `<span class="pill neg">${{p.text}}</span>`;
+      if (p.type === 'pos') return `<span class="pill pos">${p.text}</span>`;
+      if (p.type === 'neg') return `<span class="pill neg">${p.text}</span>`;
       if (p.type === 'zero') return '0';
       return '';
-    }}
+    }
 
-    function gapHTML(g) {{
+    function gapHTML(g) {
       if (!g || g.type === 'none') return '';
-      if (g.type === 'pos') return `<span class="txt pos">${{g.text}}</span>`;
-      if (g.type === 'neg') return `<span class="txt neg">${{g.text}}</span>`;
+      if (g.type === 'pos') return `<span class="txt pos">${g.text}</span>`;
+      if (g.type === 'neg') return `<span class="txt neg">${g.text}</span>`;
       if (g.type === 'zero') return '0.0';
       return '';
-    }}
+    }
 
-    function render() {{
+    function render() {
+      const rowsEl = document.getElementById('rows');
       rowsEl.innerHTML = '';
-      for (const r of data) {{
+      for (const r of data) {
         const tr = document.createElement('tr');
         tr.innerHTML = `
-          <td class="col-athlete">${{r.athlete}}</td>
-          <td class="col-latest">${{r.latest}}</td>
-          <td class="col-gap">${{r.gap}}</td>
-          <td class="col-places">${{pillHTML(r.places)}}</td>
-          <td class="col-gapfront">${{gapHTML(r.gapfront)}}</td>
+          <td class="col-athlete">${r.athlete}</td>
+          <td class="col-latest">${r.latest}</td>
+          <td class="col-gap">${r.gap}</td>
+          <td class="col-places">${pillHTML(r.places)}</td>
+          <td class="col-gapfront">${gapHTML(r.gapfront)}</td>
           <td class="col-plot">
-            <input type="checkbox" class="sel-box" name="sel" value="${{r.athlete}}" ${r.checked ? 'checked' : ''} />
+            <input type="checkbox" class="sel-box" name="sel" value="${r.athlete}" ${r.checked ? 'checked' : ''} />
           </td>
         `;
         rowsEl.appendChild(tr);
-      }}
-    }}
+      }
+    }
 
-    function updateQueryParams(selected) {{
+    function updateQueryParams(selected) {
       const url = new URL(window.location);
       url.searchParams.delete('sel');
       for (const v of selected) url.searchParams.append('sel', v);
       window.history.replaceState(null, '', url.toString());
-      // Ask Streamlit to rerun by posting location change
-      window.parent.postMessage({{type: 'streamlit:rerun'}}, '*');
-    }}
+      // Ask Streamlit to rerun
+      window.parent.postMessage({type: 'streamlit:rerun'}, '*');
+    }
 
-    document.addEventListener('change', (e) => {{
-      if (e.target && e.target.matches('input.sel-box')) {{
+    document.addEventListener('change', (e) => {
+      if (e.target && e.target.matches('input.sel-box')) {
         const boxes = Array.from(document.querySelectorAll('input.sel-box'));
         const selected = boxes.filter(b => b.checked).map(b => b.value);
         updateQueryParams(selected);
-      }}
-    }});
+      }
+    });
 
     render();
   </script>
 </body>
 </html>
-    """
+    """.replace("__ROWS_JSON__", rows_json)
 
-    # Render the component (height set to fit table and header)
     components.html(html_payload, height=520, scrolling=False)
 
-    # Read current selected names from query params to sync with Streamlit state
+    # Sync selection back to Streamlit
     qp = st.query_params
     selected_names = set(qp.get_all("sel")) if hasattr(qp, "get_all") else set(qp.get("sel", []))
-
-    # Ensure leader always included
     if rows:
         leader_name = rows[0]["athlete"]
         if leader_name not in selected_names:
@@ -469,6 +468,7 @@ else:
 
     st.session_state.plot_checks = {r["athlete"]: (r["athlete"] in selected_names) for r in rows}
     selected = [nm for nm, on in st.session_state.plot_checks.items() if on]
+
 # 6) Plot controls
 splits_present = list(df["split"].cat.categories)
 c1, c2 = st.columns(2)
