@@ -13,7 +13,7 @@ st.set_page_config(page_title="Ironman tracker (WIP)", layout="wide", initial_si
 
 DATA_FILE = "long.csv"
 
-# 1) Split order definition (static for now; will be made dynamic next update)
+# 1) Split order definition (current static baseline; can be made dynamic)
 ORDER = (
     ["START", "SWIM", "T1"] +
     [f"BIKE{i}" for i in range(1, 21)] + ["BIKE", "T2"] +
@@ -24,7 +24,7 @@ ORDER = (
 DIST_RE = re.compile(r"(?P<val>\d+(?:\.\d+)?)\s*(?P<unit>km|k|m|mi|mile|miles)", re.IGNORECASE)
 
 def parse_distance_km_from_label(label: str):
-    if not isinstance(label, str) or not label.strip():
+    if not isinstance(label, str):
         return None
     m = DIST_RE.search(label)
     if not m:
@@ -54,20 +54,23 @@ def build_split_distance_map(df: pd.DataFrame) -> dict:
                 chosen = statistics.mode(vals)
             except statistics.StatisticsError:
                 chosen = statistics.median(vals)
-            dists[str(split)] = float(chosen)
+            dists[str(split).upper()] = float(chosen)
     return dists
 
 def friendly_label(split: str, split_km: dict) -> str:
     s = str(split).upper()
-    if s == "START": return "Start"
-    if s == "FINISH": return "Finish"
-    if s in ("T1", "T2"): return s
+    if s == "START":
+        return "Start"
+    if s == "FINISH":
+        return "Finish"
+    if s in ("T1", "T2"):
+        return s
     km = split_km.get(s)
     if km is None:
         if s == "SWIM": return "Swim"
         if s.startswith("BIKE"): return "Bike"
         if s.startswith("RUN"): return "Run"
-        return s
+        return s.title()
     if s == "SWIM": return f"Swim {km:.1f} km"
     if s.startswith("BIKE"): return f"Bike {km:.1f} km"
     if s.startswith("RUN"): return f"Run {km:.1f} km"
@@ -104,10 +107,19 @@ def load_data(path: str) -> pd.DataFrame:
     df["net_td"] = df["netTime"].apply(parse_td)
 
     # Add START row for each athlete with 0:00 if not present
-    starts = df[["name"]].drop_duplicates().assign(
-        split="START", net_td=pd.to_timedelta(0, unit="s"), label="Start"
-    )
-    df = pd.concat([starts, df[["name", "split", "net_td", "label"]]], ignore_index=True)
+    if not df.empty:
+        cur_names = df["name"].dropna().unique().tolist()
+        have_start = df[df["split"] == "START"]["name"].unique().tolist()
+        need_starts = sorted(set(cur_names) - set(have_start))
+        if need_starts:
+            starts = pd.DataFrame({
+                "name": need_starts,
+                "split": ["START"] * len(need_starts),
+                "net_td": [pd.to_timedelta(0, unit="s")] * len(need_starts),
+                "label": ["" for _ in range(len(need_starts))],
+                "netTime": ["0:00:00"] * len(need_starts),
+            })
+            df = pd.concat([df, starts], ignore_index=True)
 
     # Categorical split order based on ORDER filtered to present values
     present = [s for s in ORDER if s in set(df["split"].unique())]
@@ -138,7 +150,6 @@ split_km_map = build_split_distance_map(df)
 
 st.title("Live Gaps vs Leader")
 
-
 # 5) Leaderboard data preparation
 
 # 5.1) Compute per-split leader times (minimum net time at each split)
@@ -156,7 +167,6 @@ lf_valid["split_idx"] = lf_valid["split"].map(split_order)
 lf_valid["split_idx"] = pd.to_numeric(lf_valid["split_idx"], errors="coerce").astype("Int64")
 
 # For each athlete, take the chronologically latest split with a valid time
-# If duplicates at the same split exist, pick the smallest net_td
 latest = (
     lf_valid.sort_values(["name", "split_idx", "net_td"])
             .groupby("name", as_index=False)
@@ -179,7 +189,7 @@ def _latest_label(row):
 latest["Latest split"] = latest.apply(_latest_label, axis=1)
 latest["Time behind leader"] = latest["gap_min"].map(lambda x: f"{x:.1f}")
 
-# 5.2.2) Compute place and "gap to in front" deltas vs previous split
+# 5.2.2) Compute “Places” and “Gap to in front” deltas vs previous split
 
 # Rank within each split by net time (ascending)
 ranked = (
@@ -187,16 +197,15 @@ ranked = (
             .assign(place=lambda d: d.groupby("split_idx")["net_td"].rank(method="first"))
 )
 ranked["split_idx"] = pd.to_numeric(ranked["split_idx"], errors="coerce").astype("Int64")
+ranked["place"] = ranked["place"].astype(int)
 
 # Previous split index per row (START -> <NA>)
 ranked["prev_split_idx"] = ranked["split_idx"] - 1
 
-# Current place per athlete at their latest split
-current_place = latest[["name", "split_idx"]].merge(
-    ranked[["name", "split_idx", "place"]], on=["name", "split_idx"], how="left"
-).rename(columns={"place": "place_now"})
+# Current place per athlete at latest split
+current_place = ranked[["name", "split_idx", "place"]].copy().rename(columns={"place": "place_now"})
 
-# Previous place for the same athlete (only where previous exists)
+# Previous place per athlete at previous split (align by name and prev_split_idx)
 prev_place = ranked.dropna(subset=["prev_split_idx"]).merge(
     current_place[["name", "split_idx"]],
     left_on=["name", "prev_split_idx"],
@@ -209,13 +218,23 @@ prev_place = ranked.dropna(subset=["prev_split_idx"]).merge(
 })
 
 # Merge places into latest
-latest = latest.merge(current_place[["name", "place_now"]], on="name", how="left")
+latest = latest.merge(current_place, on=["name", "split_idx"], how="left")
 latest = latest.merge(prev_place, on=["name", "split_idx"], how="left")
 
-# Places delta (positive = gained)
-latest["Places_delta"] = latest["place_prev"] - latest["place_now"]
+def compute_places_delta(prev_val, cur_val):
+    try:
+        if pd.isna(prev_val) or pd.isna(cur_val):
+            return pd.NA
+        # If moved from 4th to 3rd => +1 (gained)
+        return int(prev_val) - int(cur_val)
+    except Exception:
+        return pd.NA
 
-# Per-split "gap to in front"
+latest["Places_delta"] = [
+    compute_places_delta(p, c) for p, c in zip(latest["place_prev"], latest["place_now"])
+]
+
+# Gap to in front per split: for sorted rows within each split, compute time gap to the athlete ahead
 def per_split_gap_to_front(d: pd.DataFrame) -> pd.DataFrame:
     d = d.sort_values("net_td").reset_index(drop=True)
     d["gap_to_front_min"] = pd.NA
@@ -227,11 +246,7 @@ def per_split_gap_to_front(d: pd.DataFrame) -> pd.DataFrame:
 per_split = ranked.groupby("split_idx", group_keys=False).apply(per_split_gap_to_front)
 per_split["split_idx"] = pd.to_numeric(per_split["split_idx"], errors="coerce").astype("Int64")
 
-# Current gap_to_front
-cur_gap = latest[["name", "split_idx"]].merge(
-    per_split[["name", "split_idx", "gap_to_front_min"]],
-    on=["name", "split_idx"], how="left"
-).rename(columns={"gap_to_front_min": "gap_front_now"})
+cur_gap = per_split[["name", "split_idx", "gap_to_front_min"]].copy().rename(columns={"gap_to_front_min": "gap_front_now"})
 
 # Previous gap_to_front aligned to current split (shift index forward)
 prev_gap = per_split.copy()
@@ -241,8 +256,7 @@ prev_gap = prev_gap.rename(columns={"gap_to_front_min": "gap_front_prev"})
 latest = latest.merge(cur_gap, on=["name", "split_idx"], how="left")
 latest = latest.merge(prev_gap[["name", "split_idx", "gap_front_prev"]], on=["name", "split_idx"], how="left")
 
-# Delta: positive = getting closer (previous gap - current gap)
-def _safe_delta(prev_val, cur_val):
+def safe_gap_delta(prev_val, cur_val):
     try:
         if pd.isna(prev_val) or pd.isna(cur_val):
             return pd.NA
@@ -251,7 +265,7 @@ def _safe_delta(prev_val, cur_val):
         return pd.NA
 
 latest["Gap_to_in_front_delta"] = [
-    _safe_delta(p, c) for p, c in zip(latest["gap_front_prev"], latest["gap_front_now"])
+    safe_gap_delta(p, c) for p, c in zip(latest["gap_front_prev"], latest["gap_front_now"])
 ]
 
 # 5.2.3) Final sort for display
@@ -259,7 +273,6 @@ latest = latest.sort_values(
     ["split_idx", "gap_min", "net_td"],
     ascending=[False, True, True]
 ).reset_index(drop=True)
-
 
 # 5.3) Leaderboard display (two-level header with merged group, fixed widths, inline selection)
 st.subheader("Leaderboard")
@@ -273,6 +286,7 @@ else:
 
     # Read initial selections from query params (?sel=Name&sel=Name2)
     qp = st.query_params
+    # st.query_params supports multi-values; in recent versions get_all exists
     selected_qp = set(qp.get_all("sel")) if hasattr(qp, "get_all") else set(qp.get("sel", []))
 
     # Initialize selection state; ensure current leader is always selected
@@ -391,7 +405,7 @@ else:
           url.searchParams.delete('sel');
           sel.forEach(v => url.searchParams.append('sel', v));
           window.history.replaceState(null, '', url.toString());
-          // Trigger rerun by reloading (keeps scroll in container minimal)
+          // Trigger rerun by reloading
           window.location.assign(url.toString());
         }});
       }}
@@ -408,14 +422,13 @@ else:
     leader_name = view.iloc[0]["Athlete"]
     if leader_name not in selected_names:
         selected_names = set(selected_names) | {leader_name}
-        # Write back to query params
         st.query_params["sel"] = list(selected_names)
 
     # Update session state
     st.session_state.plot_checks = {nm: (nm in selected_names) for nm in view["Athlete"]}
     selected = [nm for nm, on in st.session_state.plot_checks.items() if on]
 
-# 6) From/To split controls
+# 6) Plot controls
 splits_present = list(df["split"].cat.categories)
 c1, c2 = st.columns(2)
 with c1:
@@ -427,12 +440,14 @@ with c2:
 
 # 7) Data slice for plotting
 range_splits = split_range(splits_present, from_split, to_split)
-plot_df = df[(df["name"].isin(selected)) & (df["split"].astype(str).isin(range_splits))].copy()
+plot_df = df[(df["name"].isin(selected)) & (df["split"].isin(range_splits))].copy()
 
-# 8) Plot
-if not plot_df.empty:
-    leaders2 = compute_leader(df)
-    xy = plot_df.merge(leaders2, on="split", how="left").dropna(subset=["net_td", "leader_td"])
+if plot_df.empty:
+    st.info("Select athletes to plot.")
+else:
+    leaders2 = compute_leader(df[df["split"].isin(range_splits)])
+    xy = (plot_df.merge(leaders2, on="split", how="left")
+                 .dropna(subset=["net_td", "leader_td"]))
     xy["leader_hr"] = xy["leader_td"].dt.total_seconds() / 3600.0
     xy["gap_min_pos"] = ((xy["net_td"] - xy["leader_td"]).dt.total_seconds() / 60.0).clip(lower=0)
     xy["split_label"] = xy["split"].map(lambda s: friendly_label(s, split_km_map))
@@ -444,9 +459,11 @@ if not plot_df.empty:
         g = g.sort_values("leader_hr")
         fig.add_trace(go.Scatter(
             x=g["leader_hr"], y=g["gap_min_pos"],
-            mode="lines", line=dict(width=1.8),
-            name=nm, showlegend=False,
-            hovertemplate="Athlete: %{text}<br>Split: %{meta}<br>Leader elapsed: %{x:.2f} h<br>Behind: %{y:.1f} min",
+            mode="lines+markers",
+            name=str(nm),
+            line=dict(width=2.0),
+            marker=dict(size=5),
+            hovertemplate="%{text}<br>Split: %{meta}<br>Leader elapsed: %{x:.2f} h<br>Behind: %{y:.1f} min",
             text=[nm]*len(g), meta=g["split_label"],
         ))
 
@@ -456,12 +473,14 @@ if not plot_df.empty:
         dict(
             x=float(r["leader_hr"]), y=float(r["gap_min_pos"]),
             xref="x", yref="y", text=str(r["name"]), showarrow=False,
-            xanchor="left", yanchor="middle", font=dict(size=11, color="rgba(0,0,0,0.9)")
+            xanchor="left", yanchor="middle",
+            font=dict(size=11, color="rgba(0,0,0,0.75)")
         )
         for _, r in ends.iterrows()
     ]
+    fig.update_layout(annotations=annotations)
 
-    # 8.3) Axes and ticks
+    # 8.3) Axes styling
     if len(xy):
         x_left = math.floor(xy["leader_hr"].min() / 0.5) * 0.5
         x_right = math.ceil(xy["leader_hr"].max() / 0.5) * 0.5 + 0.25
@@ -476,13 +495,12 @@ if not plot_df.empty:
         showgrid=True, zeroline=False, showline=True, mirror=True, ticks="outside"
     )
     fig.update_yaxes(
-        title="Time behind leader (min)",
-        autorange="reversed",
+        title="Behind (min)",
         showgrid=True, zeroline=True, zerolinecolor="rgba(0,0,0,0.25)",
         showline=True, mirror=True, ticks="outside"
     )
 
-    # 8.4) Vertical reference lines at SWIM, T1, BIKE, T2
+    # 8.4) Vertical reference lines at SWIM, T1, BIKE, T2 (solid, full height)
     ref_points = {}
     for anchor in ["SWIM", "T1", "BIKE", "T2"]:
         sub = xy[xy["split"] == anchor]
@@ -495,7 +513,7 @@ if not plot_df.empty:
 
     for anchor, x_val in ref_points.items():
         color = {
-            "SWIM": "rgba(0,0,0,0.45)",
+            "SWIM": "rgba(0,0,0,0.35)",
             "T1":   "rgba(0,0,0,0.35)",
             "BIKE": "rgba(0,0,0,0.45)",
             "T2":   "rgba(0,0,0,0.35)",
@@ -512,9 +530,8 @@ if not plot_df.empty:
 
     fig.update_layout(
         height=520,
-        margin=dict(l=50, r=30, t=30, b=40),
-        annotations=annotations
+        margin=dict(l=10, r=10, t=30, b=30),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0)
     )
+
     st.plotly_chart(fig, use_container_width=True)
-else:
-    st.info("Select athletes to plot.")
