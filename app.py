@@ -261,11 +261,7 @@ latest = latest.sort_values(
 ).reset_index(drop=True)
 
 
-Good catch — that’s a typo in Section 5.3 when initializing plot_checks. Here is a corrected full replacement for Section 5.3 only.
 
-Replace your entire Section 5.3 with the block below.
-
-```python
 # 5.3) Leaderboard display (two-level header with merged group and styling)
 st.subheader("Leaderboard")
 
