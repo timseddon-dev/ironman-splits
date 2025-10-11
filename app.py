@@ -377,13 +377,6 @@ else:
     st.markdown("</tbody></table></div>", unsafe_allow_html=True)
 
     selected = [nm for nm, on in st.session_state.plot_checks.items() if on]
-```
-
-Changes made:
-- Fixed the bracket typo when initializing st.session_state.plot_checks.
-- Also simplified initialization to use the already-renamed view["Athlete"].
-
-If anything else errors, send the exact section number and line, and I’ll replace that whole section accordingly.
 
 
 # 6) From/To split controls
