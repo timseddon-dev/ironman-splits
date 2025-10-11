@@ -261,7 +261,6 @@ latest = latest.sort_values(
 ).reset_index(drop=True)
 
 
-
 # 5.3) Leaderboard display (two-level header with merged group, fixed widths, inline selection)
 st.subheader("Leaderboard")
 
