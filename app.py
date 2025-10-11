@@ -262,7 +262,7 @@ latest = latest.sort_values(
 
 
 
-# 5.3) Leaderboard display (two-level header with merged group and styling)
+# 5.3) Leaderboard display (two-level header with merged group, fixed widths, inline selection)
 st.subheader("Leaderboard")
 
 if latest.empty:
@@ -272,112 +272,151 @@ else:
     view = latest[["name", "Latest split", "Time behind leader", "Places_delta", "Gap_to_in_front_delta"]].copy()
     view = view.rename(columns={"name": "Athlete"})
 
+    # Persist selections in query params for stability across reruns
+    qp = st.experimental_get_query_params()
+    selected_qp = set(qp.get("sel", []))  # list of names in query params
+    if "plot_checks" not in st.session_state:
+        # Initialize from query params; ensure current leader is always selected
+        init = {nm: (nm in selected_qp) for nm in view["Athlete"]}
+        leader_name = latest.iloc[0]["Athlete"] if "Athlete" in latest.columns else latest.iloc[0]["name"]
+        init[leader_name] = True
+        st.session_state.plot_checks = init
+    else:
+        # Ensure leader stays selected
+        leader_name = latest.iloc[0]["Athlete"] if "Athlete" in latest.columns else latest.iloc[0]["name"]
+        st.session_state.plot_checks[leader_name] = True
+
+    # CSS: fixed column widths, no wrapping, unified table layout
     st.markdown("""
         <style>
-        .lb-container { max-height: 460px; overflow-y: auto; border: 1px solid rgba(0,0,0,0.08); border-radius: 6px; }
-        table.lb { border-collapse: collapse; width: 100%; font-size: 14px; }
+        .lb-wrap { border: 1px solid rgba(0,0,0,0.08); border-radius: 6px; }
+        .lb-scroll { max-height: 460px; overflow-y: auto; }
+        table.lb { border-collapse: collapse; width: 100%; table-layout: fixed; font-size: 14px; }
+        table.lb th, table.lb td { padding: 8px; border-bottom: 1px solid rgba(0,0,0,0.06); vertical-align: middle; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
         table.lb thead th { position: sticky; top: 0; background: #fff; z-index: 2; border-bottom: 1px solid rgba(0,0,0,0.15); }
-        table.lb thead tr.top th { height: 28px; font-weight: 700; text-align: left; padding: 6px 8px; }
-        table.lb thead tr.bottom th { height: 28px; font-weight: 600; text-align: left; padding: 6px 8px; border-bottom: 1px solid rgba(0,0,0,0.08); }
-        table.lb tbody td { padding: 8px; border-bottom: 1px solid rgba(0,0,0,0.06); vertical-align: middle; }
-        .col-athlete { width: 28%; }
-        .col-latest  { width: 24%; }
-        .col-gap     { width: 16%; }
-        .col-places  { width: 12%; }
-        .col-gapfront{ width: 12%; }
-        .col-plot    { width: 8%; text-align: center; }
+        table.lb thead tr.top th { height: 28px; font-weight: 700; text-align: left; }
+        table.lb thead tr.bottom th { height: 28px; font-weight: 600; text-align: left; border-bottom: 1px solid rgba(0,0,0,0.08); }
+        /* Fixed widths per column to keep all rows aligned */
+        .col-athlete  { width: 26%; }
+        .col-latest   { width: 24%; }
+        .col-gap      { width: 16%; }
+        .col-places   { width: 12%; text-align: left; }
+        .col-gapfront { width: 14%; text-align: left; }
+        .col-plot     { width: 8%;  text-align: center; }
+        /* Pills and colors */
         .pill-pos { display:inline-block; padding: 2px 8px; border-radius: 999px; background:#1aa260; color:#fff; font-weight:700; }
         .pill-neg { display:inline-block; padding: 2px 8px; border-radius: 999px; background:#d93025; color:#fff; font-weight:700; }
-        .txt-pos { color:#1aa260; font-weight:700; }
-        .txt-neg { color:#d93025; font-weight:700; }
+        .txt-pos  { color:#1aa260; font-weight:700; }
+        .txt-neg  { color:#d93025; font-weight:700; }
+        /* Inline checkbox styling */
+        .sel-box { transform: scale(1.2); cursor: pointer; }
         </style>
     """, unsafe_allow_html=True)
 
-    # Initialize selection state
-    if "plot_checks" not in st.session_state:
-        st.session_state.plot_checks = {nm: False for nm in view["Athlete"]}
-
-    leader_name = latest.iloc[0]["name"]
-    st.session_state.plot_checks[leader_name] = True
-
-    st.markdown('<div class="lb-container">', unsafe_allow_html=True)
-    st.markdown(
-        """
-        <table class="lb">
-          <thead>
-            <tr class="top">
-              <th class="col-athlete"></th>
-              <th class="col-latest"></th>
-              <th class="col-gap"></th>
-              <th colspan="2" style="text-align:center;">Change since last split</th>
-              <th class="col-plot"></th>
-            </tr>
-            <tr class="bottom">
-              <th class="col-athlete">Athlete</th>
-              <th class="col-latest">Latest split</th>
-              <th class="col-gap">Time behind leader</th>
-              <th class="col-places">Places</th>
-              <th class="col-gapfront">Gap to in front</th>
-              <th class="col-plot">Plot</th>
-            </tr>
-          </thead>
-          <tbody>
-        """,
-        unsafe_allow_html=True
-    )
-
-    RENDER_ROWS = min(len(view), 200)
-    for i in range(RENDER_ROWS):
-        r = view.iloc[i]
-        nm = r["Athlete"]
-
+    # Build header and rows as pure HTML so the checkbox is inside the same row
+    # We’ll emit a form with checkboxes named sel and submit it via JS on change to keep Streamlit state in sync.
+    rows_html = []
+    for nm, latest_split, gap_txt, places_delta, gap_delta in view.itertuples(index=False, name=None):
         # Places pill
-        places = r["Places_delta"]
-        if pd.isna(places):
+        if pd.isna(places_delta):
             places_html = ""
         else:
-            if places > 0:
-                places_html = f'<span class="pill-pos">+{int(places)}</span>'
-            elif places < 0:
-                places_html = f'<span class="pill-neg">-{int(abs(places))}</span>'
+            if places_delta > 0:
+                places_html = f'<span class="pill-pos">+{int(places_delta)}</span>'
+            elif places_delta < 0:
+                places_html = f'<span class="pill-neg">-{int(abs(places_delta))}</span>'
             else:
                 places_html = "0"
 
-        # Gap to in front delta
-        gdelta = r["Gap_to_in_front_delta"]
-        if pd.isna(gdelta):
-            gap_html = ""
+        # Gap-to-in-front delta
+        if pd.isna(gap_delta):
+            gapfront_html = ""
         else:
-            if gdelta > 0:
-                gap_html = f'<span class="txt-pos">+{gdelta:.1f}</span>'
-            elif gdelta < 0:
-                gap_html = f'<span class="txt-neg">{gdelta:.1f}</span>'
+            if gap_delta > 0:
+                gapfront_html = f'<span class="txt-pos">+{gap_delta:.1f}</span>'
+            elif gap_delta < 0:
+                gapfront_html = f'<span class="txt-neg">{gap_delta:.1f}</span>'
             else:
-                gap_html = "0.0"
+                gapfront_html = "0.0"
 
-        st.markdown(
-            f"""
+        checked = "checked" if st.session_state.plot_checks.get(nm, False) else ""
+        row = f"""
             <tr>
               <td class="col-athlete">{nm}</td>
-              <td class="col-latest">{r["Latest split"]}</td>
-              <td class="col-gap">{r["Time behind leader"]}</td>
+              <td class="col-latest">{latest_split}</td>
+              <td class="col-gap">{gap_txt}</td>
               <td class="col-places">{places_html}</td>
-              <td class="col-gapfront">{gap_html}</td>
-              <td class="col-plot" id="plot-cell-{i}"></td>
+              <td class="col-gapfront">{gapfront_html}</td>
+              <td class="col-plot">
+                <input type="checkbox" class="sel-box" name="sel" value="{nm}" {checked} />
+              </td>
             </tr>
-            """,
-            unsafe_allow_html=True
-        )
+        """
+        rows_html.append(row)
 
-        ck_key = f"plot_{nm}"
-        current = st.session_state.plot_checks.get(nm, False)
-        st.session_state.plot_checks[nm] = True if nm == leader_name else current
-        st.checkbox("", key=ck_key, value=st.session_state.plot_checks[nm], label_visibility="hidden")
+    # Full table HTML with merged header cells:
+    # - Top row: merge col 1,2,3,6 with rowspan=2; group header (colspan=2) over cols 4-5
+    table_html = f"""
+    <div class="lb-wrap">
+      <form id="lb-form" method="get">
+        <div class="lb-scroll">
+          <table class="lb">
+            <thead>
+              <tr class="top">
+                <th class="col-athlete" rowspan="2">Athlete</th>
+                <th class="col-latest"  rowspan="2">Latest split</th>
+                <th class="col-gap"     rowspan="2">Time behind leader</th>
+                <th colspan="2" style="text-align:center;">Change since last split</th>
+                <th class="col-plot"    rowspan="2">Plot</th>
+              </tr>
+              <tr class="bottom">
+                <th class="col-places">Places</th>
+                <th class="col-gapfront">Gap to in front</th>
+              </tr>
+            </thead>
+            <tbody>
+              {''.join(rows_html)}
+            </tbody>
+          </table>
+        </div>
+      </form>
+    </div>
+    <script>
+      // Auto-submit selection via query params on change
+      const form = document.getElementById('lb-form');
+      if (form) {{
+        form.addEventListener('change', (e) => {{
+          const boxes = form.querySelectorAll('input[name="sel"]');
+          const vals = [];
+          boxes.forEach(b => {{ if (b.checked) vals.push(b.value); }});
+          const url = new URL(window.location);
+          url.searchParams.delete('sel');
+          vals.forEach(v => url.searchParams.append('sel', v));
+          window.history.replaceState(null, '', url.toString());
+          // Trigger a Streamlit rerun by programmatically clicking the hidden anchor
+          const anchor = document.createElement('a');
+          anchor.href = url.toString();
+          document.body.appendChild(anchor);
+          anchor.click();
+          document.body.removeChild(anchor);
+        }});
+      }}
+    </script>
+    """
 
-    st.markdown("</tbody></table></div>", unsafe_allow_html=True)
+    st.markdown(table_html, unsafe_allow_html=True)
 
+    # After render, read query params to produce selected list for plotting and sync session_state
+    qp = st.experimental_get_query_params()
+    selected_names = qp.get("sel", [])
+    # Ensure leader always included
+    leader_name = latest.iloc[0]["Athlete"] if "Athlete" in latest.columns else latest.iloc[0]["name"]
+    if leader_name not in selected_names:
+        selected_names = list(selected_names) + [leader_name]
+        st.experimental_set_query_params(sel=selected_names)
+    # Update session state
+    st.session_state.plot_checks = {nm: (nm in set(selected_names)) for nm in view["Athlete"]}
     selected = [nm for nm, on in st.session_state.plot_checks.items() if on]
-
 
 # 6) From/To split controls
 splits_present = list(df["split"].cat.categories)
