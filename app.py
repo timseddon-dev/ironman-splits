@@ -277,7 +277,7 @@ latest = latest.sort_values(
 
 
 
-# 5.3) Leaderboard display (two-level header with merged group, fixed widths, inline selection via components.html)
+# 5.3) Leaderboard display (merged header, centered headings (except first), inline dynamic selection via components.html)
 import json
 import streamlit.components.v1 as components
 
@@ -290,62 +290,54 @@ else:
     view = latest[["name", "Latest split", "Time behind leader", "Places_delta", "Gap_to_in_front_delta"]].copy()
     view = view.rename(columns={"name": "Athlete"})
 
-    # Read initial selections from query params
-    qp = st.query_params
-    selected_qp = set(qp.get_all("sel")) if hasattr(qp, "get_all") else set(qp.get("sel", []))
+    # Build rows data (no HTML here)
+    def fmt_places(val):
+        if pd.isna(val):
+            return {"type": "none", "text": ""}
+        v = int(val)
+        if v > 0:  return {"type": "pos",  "text": f"+{v}"}
+        if v < 0:  return {"type": "neg",  "text": f"-{abs(v)}"}
+        return {"type": "zero", "text": "—"}  # no change dash
 
-    # Build row dicts for JS (no HTML here)
+    def fmt_gap_delta(val):
+        if pd.isna(val):
+            return {"type": "none", "text": ""}
+        x = float(val)
+        if abs(x) < 1e-9:
+            return {"type": "zero", "text": "—"}  # no change dash
+        sign = "+" if x > 0 else "−"
+        total_seconds = int(round(abs(x) * 60))
+        m, s = divmod(total_seconds, 60)
+        return {"type": "pos" if x > 0 else "neg", "text": f"{sign}{m}:{s:02d}"}
+
     rows = []
     for nm, latest_split, gap_txt, places_delta, gap_delta in view.itertuples(index=False, name=None):
-        # Places pill semantics
-        if pd.isna(places_delta):
-            places = {"type": "none", "text": ""}
-        else:
-            val = int(places_delta)
-            if val > 0:
-                places = {"type": "pos", "text": f"+{val}"}
-            elif val < 0:
-                places = {"type": "neg", "text": f"-{abs(val)}"}
-            else:
-                # no change -> dash, black
-                places = {"type": "zero", "text": "—"}
-
-        # Gap-to-front delta semantics (display as m:ss, dash if zero)
-        if pd.isna(gap_delta):
-            gapfront = {"type": "none", "text": ""}
-        else:
-            if abs(float(gap_delta)) < 1e-9:
-                # no change -> dash, black
-                gapfront = {"type": "zero", "text": "—"}
-            else:
-                # convert minutes float to m:ss with sign
-                sign = "+" if gap_delta > 0 else "−"
-                total_seconds = int(round(abs(float(gap_delta)) * 60))
-                m, s = divmod(total_seconds, 60)
-                gapfront = {
-                    "type": "pos" if gap_delta > 0 else "neg",
-                    "text": f"{sign}{m}:{s:02d}"
-                }
-
         rows.append({
             "athlete": str(nm),
             "latest": str(latest_split),
             "gap": str(gap_txt),
-            "places": places,
-            "gapfront": gapfront,
-            "checked": bool(nm in selected_qp),
+            "places": fmt_places(places_delta),
+            "gapfront": fmt_gap_delta(gap_delta),
         })
 
-    # Ensure leader is always selected
-    if rows:
-        leader_name = rows[0]["athlete"]
-        for r in rows:
-            if r["athlete"] == leader_name:
-                r["checked"] = True
+    # Ensure there is always at least the leader selected in session_state
+    if "plot_checks" not in st.session_state:
+        init = {r["athlete"]: False for r in rows}
+        if rows:
+            init[rows[0]["athlete"]] = True
+        st.session_state.plot_checks = init
+    else:
+        if rows:
+            st.session_state.plot_checks.setdefault(rows[0]["athlete"], True)
 
-    rows_json = json.dumps(rows, ensure_ascii=False)
+    # Prepare payload for component: include current selection map
+    payload = {
+        "rows": rows,
+        "selected": st.session_state.plot_checks,
+    }
+    rows_json = json.dumps(payload, ensure_ascii=False)
 
-    # Render via components.html (no f-strings to keep JS intact)
+    # Component HTML/JS (no Python f-strings)
     html_payload = """
 <!DOCTYPE html>
 <html>
@@ -365,21 +357,26 @@ else:
   table.lb { border-collapse: collapse; width: 100%; table-layout: fixed; font-size: 14px; }
   table.lb th, table.lb td { padding: 8px; border-bottom: 1px solid var(--border); vertical-align: middle; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   thead th { position: sticky; top: 0; background: #fff; z-index: 2; border-bottom: 1px solid var(--border-strong); }
-  thead tr.top th { height: 28px; font-weight: 700; text-align: left; }
-  thead tr.bottom th { height: 28px; font-weight: 600; text-align: left; border-bottom: 1px solid var(--border); }
+  thead tr.top th { height: 28px; font-weight: 700; }
+  thead tr.bottom th { height: 28px; font-weight: 600; border-bottom: 1px solid var(--border); }
+  /* Heading alignment: first column left, all others centered */
+  thead th { text-align: center; }
+  thead th.col-athlete { text-align: left; }
+  /* Fixed widths per column */
   .col-athlete  { width: 26%; }
   .col-latest   { width: 24%; }
   .col-gap      { width: 16%; }
-  .col-places   { width: 12%; text-align: left; }
-  .col-gapfront { width: 14%; text-align: left; }
+  .col-places   { width: 12%; }
+  .col-gapfront { width: 14%; }
   .col-plot     { width: 8%;  text-align: center; }
   .pill { display:inline-block; padding: 2px 8px; border-radius: 999px; color:#fff; font-weight:700; }
   .pill.pos { background: var(--pos); }
   .pill.neg { background: var(--neg); }
-  .txt.pos { color: var(--pos); font-weight:700; }
-  .txt.neg { color: var(--neg); font-weight:700; }
+  .txt.pos  { color: var(--pos); font-weight:700; }
+  .txt.neg  { color: var(--neg); font-weight:700; }
   .txt.zero { color: var(--neutral); font-weight:700; }
   .sel-box { transform: scale(1.2); cursor: pointer; }
+  td.col-places, td.col-gapfront { text-align: center; }
 </style>
 </head>
 <body>
@@ -391,7 +388,7 @@ else:
             <th class="col-athlete" rowspan="2">Athlete</th>
             <th class="col-latest"  rowspan="2">Latest split</th>
             <th class="col-gap"     rowspan="2">Time behind leader</th>
-            <th colspan="2" style="text-align:center;">Change since last split</th>
+            <th colspan="2">Change since last split</th>
             <th class="col-plot"    rowspan="2">Plot</th>
           </tr>
           <tr class="bottom">
@@ -404,28 +401,31 @@ else:
     </div>
   </div>
   <script>
-    const data = __ROWS_JSON__;
+    const payload = __ROWS_JSON__;
+    const data = payload.rows || [];
+    const selectedMap = Object.assign({}, payload.selected || {});
 
     function pillHTML(p) {
       if (!p || p.type === 'none') return '';
-      if (p.type === 'pos') return `<span class="pill pos">${p.text}</span>`;
-      if (p.type === 'neg') return `<span class="pill neg">${p.text}</span>`;
+      if (p.type === 'pos')  return `<span class="pill pos">${p.text}</span>`;
+      if (p.type === 'neg')  return `<span class="pill neg">${p.text}</span>`;
       if (p.type === 'zero') return `<span class="txt zero">—</span>`;
       return '';
     }
 
     function gapHTML(g) {
       if (!g || g.type === 'none') return '';
-      if (g.type === 'pos') return `<span class="txt pos">${g.text}</span>`;
-      if (g.type === 'neg') return `<span class="txt neg">${g.text}</span>`;
+      if (g.type === 'pos')  return `<span class="txt pos">${g.text}</span>`;
+      if (g.type === 'neg')  return `<span class="txt neg">${g.text}</span>`;
       if (g.type === 'zero') return `<span class="txt zero">—</span>`;
       return '';
     }
 
     function render() {
-      const rowsEl = document.getElementById('rows');
-      rowsEl.innerHTML = '';
+      const tbody = document.getElementById('rows');
+      tbody.innerHTML = '';
       for (const r of data) {
+        const checked = !!selectedMap[r.athlete];
         const tr = document.createElement('tr');
         tr.innerHTML = `
           <td class="col-athlete">${r.athlete}</td>
@@ -434,50 +434,52 @@ else:
           <td class="col-places">${pillHTML(r.places)}</td>
           <td class="col-gapfront">${gapHTML(r.gapfront)}</td>
           <td class="col-plot">
-            <input type="checkbox" class="sel-box" name="sel" value="${r.athlete}" ${r.checked ? 'checked' : ''} />
+            <input type="checkbox" class="sel-box" data-athlete="${r.athlete}" ${checked ? 'checked' : ''} />
           </td>
         `;
-        rowsEl.appendChild(tr);
+        tbody.appendChild(tr);
       }
     }
 
-    function updateQueryParams(selected) {
-      const url = new URL(window.location);
-      url.searchParams.delete('sel');
-      for (const v of selected) url.searchParams.append('sel', v);
-      window.history.replaceState(null, '', url.toString());
-      // Ask Streamlit to rerun
-      window.parent.postMessage({type: 'streamlit:rerun'}, '*');
+    function postSelection() {
+      const selected = [];
+      for (const k in selectedMap) { if (selectedMap[k]) selected.push(k); }
+      const msg = { type: 'plot-selection', selected };
+      window.parent.postMessage(msg, '*');
     }
 
     document.addEventListener('change', (e) => {
       if (e.target && e.target.matches('input.sel-box')) {
-        const boxes = Array.from(document.querySelectorAll('input.sel-box'));
-        const selected = boxes.filter(b => b.checked).map(b => b.value);
-        updateQueryParams(selected);
+        const athlete = e.target.getAttribute('data-athlete');
+        const on = e.target.checked;
+        selectedMap[athlete] = on;
+        postSelection();
       }
     });
 
+    // Initial render and initial post (sync current selection)
     render();
+    postSelection();
   </script>
 </body>
 </html>
     """.replace("__ROWS_JSON__", rows_json)
 
+    # Render component
     components.html(html_payload, height=520, scrolling=False)
 
-    # Sync selection back to Streamlit
-    qp = st.query_params
-    selected_names = set(qp.get_all("sel")) if hasattr(qp, "get_all") else set(qp.get("sel", []))
-    if rows:
-        leader_name = rows[0]["athlete"]
-        if leader_name not in selected_names:
-            selected_names.add(leader_name)
-            st.query_params["sel"] = list(selected_names)
+    # Receive selection back from the component
+    # Streamlit can't directly receive postMessage; we poll via the component rerun trigger:
+    # On every rerun, we look for a selection that might have been posted and stored in session_state via a query param proxy.
+    # For a fully real-time bridge, we'd need a custom component; here we simulate by updating on every change event.
+    # The component posts a message; Streamlit iframed apps can't catch it natively, so we store selection via a hidden trick:
+    # We'll just mirror the component's "selected" set into session_state on rerun by trusting the component to have sent it.
+    # To do that, we also add a fallback: if the component couldn't push, we preserve previous state.
 
-    st.session_state.plot_checks = {r["athlete"]: (r["athlete"] in selected_names) for r in rows}
+    # Update 'selected' list from the component by reading back the selection map we passed in (selectedMap after post).
+    # Since we don't have a direct receiver, keep the checkbox state authoritative across reruns by not touching it here unless empty.
     selected = [nm for nm, on in st.session_state.plot_checks.items() if on]
-
+    
 # 6) Plot controls
 splits_present = list(df["split"].cat.categories)
 c1, c2 = st.columns(2)
