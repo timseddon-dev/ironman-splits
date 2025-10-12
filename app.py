@@ -307,18 +307,25 @@ else:
             elif val < 0:
                 places = {"type": "neg", "text": f"-{abs(val)}"}
             else:
-                places = {"type": "zero", "text": "0"}
+                # no change -> dash, black
+                places = {"type": "zero", "text": "—"}
 
-        # Gap-to-front delta semantics
+        # Gap-to-front delta semantics (display as m:ss, dash if zero)
         if pd.isna(gap_delta):
             gapfront = {"type": "none", "text": ""}
         else:
-            if gap_delta > 0:
-                gapfront = {"type": "pos", "text": f"+{gap_delta:.1f}"}
-            elif gap_delta < 0:
-                gapfront = {"type": "neg", "text": f"{gap_delta:.1f}"}
+            if abs(float(gap_delta)) < 1e-9:
+                # no change -> dash, black
+                gapfront = {"type": "zero", "text": "—"}
             else:
-                gapfront = {"type": "zero", "text": "0.0"}
+                # convert minutes float to m:ss with sign
+                sign = "+" if gap_delta > 0 else "−"
+                total_seconds = int(round(abs(float(gap_delta)) * 60))
+                m, s = divmod(total_seconds, 60)
+                gapfront = {
+                    "type": "pos" if gap_delta > 0 else "neg",
+                    "text": f"{sign}{m}:{s:02d}"
+                }
 
         rows.append({
             "athlete": str(nm),
@@ -338,7 +345,7 @@ else:
 
     rows_json = json.dumps(rows, ensure_ascii=False)
 
-    # Use a plain triple-quoted string (NOT an f-string) so JS ${...} is untouched
+    # Render via components.html (no f-strings to keep JS intact)
     html_payload = """
 <!DOCTYPE html>
 <html>
@@ -350,6 +357,7 @@ else:
     --border-strong: rgba(0,0,0,0.15);
     --pos: #1aa260;
     --neg: #d93025;
+    --neutral: #111;
   }
   body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Arial, sans-serif; }
   .wrap { border: 1px solid var(--border); border-radius: 6px; }
@@ -370,6 +378,7 @@ else:
   .pill.neg { background: var(--neg); }
   .txt.pos { color: var(--pos); font-weight:700; }
   .txt.neg { color: var(--neg); font-weight:700; }
+  .txt.zero { color: var(--neutral); font-weight:700; }
   .sel-box { transform: scale(1.2); cursor: pointer; }
 </style>
 </head>
@@ -401,7 +410,7 @@ else:
       if (!p || p.type === 'none') return '';
       if (p.type === 'pos') return `<span class="pill pos">${p.text}</span>`;
       if (p.type === 'neg') return `<span class="pill neg">${p.text}</span>`;
-      if (p.type === 'zero') return '0';
+      if (p.type === 'zero') return `<span class="txt zero">—</span>`;
       return '';
     }
 
@@ -409,7 +418,7 @@ else:
       if (!g || g.type === 'none') return '';
       if (g.type === 'pos') return `<span class="txt pos">${g.text}</span>`;
       if (g.type === 'neg') return `<span class="txt neg">${g.text}</span>`;
-      if (g.type === 'zero') return '0.0';
+      if (g.type === 'zero') return `<span class="txt zero">—</span>`;
       return '';
     }
 
