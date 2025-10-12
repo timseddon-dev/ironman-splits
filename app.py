@@ -287,7 +287,7 @@ if latest.empty:
     selected = []
 else:
     view = latest[["name", "Latest split", "Time behind leader", "Places_delta", "Gap_to_in_front_delta"]].copy()
-    view = view.rename(columns({"name": "Athlete"}))
+    view = view.rename(columns={"name": "Athlete"})
 
     # Format helpers
     def fmt_places(val):
