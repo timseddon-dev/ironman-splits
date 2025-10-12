@@ -276,8 +276,7 @@ latest = latest.sort_values(
 
 
 
-
-# 5.3) Leaderboard display (fixed widths, merged headers, centered headings, in-table checkboxes with session sync)
+# 5.3) Leaderboard display (fixed widths, merged headers, centered headings/cells, live selection via hidden input bridge)
 import json
 import streamlit.components.v1 as components
 
@@ -288,7 +287,7 @@ if latest.empty:
     selected = []
 else:
     view = latest[["name", "Latest split", "Time behind leader", "Places_delta", "Gap_to_in_front_delta"]].copy()
-    view = view.rename(columns={"name": "Athlete"})
+    view = view.rename(columns({"name": "Athlete"}))
 
     # Format helpers
     def fmt_places(val):
@@ -330,26 +329,26 @@ else:
         if rows:
             st.session_state.plot_checks.setdefault(rows[0]["athlete"], True)
 
-    # Hidden input to receive selection payload from the component
+    # Hidden input to receive selection payload (JSON array of names)
     sel_payload = st.text_input("sel_payload", value="", key="sel_payload", label_visibility="collapsed")
 
-    # If the component posted a selection payload, update session_state
+    # Update session state from payload, if present
     if sel_payload:
         try:
             selected_names = set(json.loads(sel_payload))
             for r in rows:
-                st.session_state.plot_checks[r["athlete"]] = r["athlete"] in selected_names
+                st.session_state.plot_checks[r["athlete"]] = (r["athlete"] in selected_names)
         except Exception:
-            pass  # ignore malformed
+            pass  # ignore malformed payload
 
-    # Build data payload for component (rows + current selection map)
+    # Build payload for component
     payload = {
         "rows": rows,
         "selected": st.session_state.plot_checks,
     }
     payload_json = json.dumps(payload, ensure_ascii=False)
 
-    # Component HTML/JS (no Python interpolation inside)
+    # Component HTML/JS
     html_payload = """
 <!DOCTYPE html>
 <html>
@@ -455,15 +454,19 @@ else:
     function postSelection() {
       const names = [];
       for (const k in selected) { if (selected[k]) names.push(k); }
-      // Write into the hidden input 'sel_payload' in the parent Streamlit app
-      const txts = window.parent.document.querySelectorAll('input[type="text"][id^="sel_payload"]');
-      if (txts && txts.length) {
-        const el = txts[0];
-        el.value = JSON.stringify(names);
-        // Trigger input event so Streamlit picks it up
-        const evt = new Event('input', { bubbles: true });
-        el.dispatchEvent(evt);
+      // Find the hidden text input by its placeholder label "sel_payload"
+      const inputs = window.parent.document.querySelectorAll('input[type="text"]');
+      for (const el of inputs) {
+        // Pick the one whose id includes 'sel_payload' (Streamlit generates id from the label)
+        if (el.id && el.id.indexOf('sel_payload') !== -1) {
+          el.value = JSON.stringify(names);
+          const evt = new Event('input', { bubbles: true });
+          el.dispatchEvent(evt);
+          break;
+        }
       }
+      // Trigger a rerun in Streamlit parent
+      window.parent.postMessage({type: 'streamlit:rerun'}, '*');
     }
 
     document.addEventListener('change', (e) => {
@@ -474,8 +477,8 @@ else:
       }
     });
 
+    // Initial render and sync
     renderRows();
-    // Initial sync so Streamlit has the current selection
     postSelection();
   </script>
 </body>
