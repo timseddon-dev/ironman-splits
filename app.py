@@ -277,8 +277,9 @@ latest = latest.sort_values(
 
 
 
-# 5.3) Leaderboard display (merged headers, centered headings/cells, robust selection via Streamlit widgets)
-import pandas as pd
+# 5.3) Leaderboard display (fixed widths, merged headers, centered headings, in-table checkboxes with session sync)
+import json
+import streamlit.components.v1 as components
 
 st.subheader("Leaderboard")
 
@@ -286,130 +287,206 @@ if latest.empty:
     st.info("Waiting for live data...")
     selected = []
 else:
-    # Prepare view data
     view = latest[["name", "Latest split", "Time behind leader", "Places_delta", "Gap_to_in_front_delta"]].copy()
     view = view.rename(columns={"name": "Athlete"})
 
     # Format helpers
     def fmt_places(val):
         if pd.isna(val):
-            return "", ""
+            return {"type": "none", "text": ""}
         v = int(val)
-        if v > 0:  return f"+{v}", "pill-pos"
-        if v < 0:  return f"-{abs(v)}", "pill-neg"
-        return "—", "txt-zero"  # dash on no change
+        if v > 0:  return {"type": "pos",  "text": f"+{v}"}
+        if v < 0:  return {"type": "neg",  "text": f"-{abs(v)}"}
+        return {"type": "zero", "text": "—"}  # dash on no change
 
     def fmt_gap_delta(val):
         if pd.isna(val):
-            return "", ""
+            return {"type": "none", "text": ""}
         x = float(val)
         if abs(x) < 1e-9:
-            return "—", "txt-zero"  # dash on no change
+            return {"type": "zero", "text": "—"}  # dash on no change
         sign = "+" if x > 0 else "−"
         total_seconds = int(round(abs(x) * 60))
         m, s = divmod(total_seconds, 60)
-        cls = "txt-pos" if x > 0 else "txt-neg"
-        return f"{sign}{m}:{s:02d}", cls
+        typ = "pos" if x > 0 else "neg"
+        return {"type": typ, "text": f"{sign}{m}:{s:02d}"}
 
-    # Initialize selection state (ensure leader selected)
+    rows = []
+    for nm, latest_split, gap_txt, places_delta, gap_delta in view.itertuples(index=False, name=None):
+        rows.append({
+            "athlete": str(nm),
+            "latest": str(latest_split),
+            "gap": str(gap_txt),
+            "places": fmt_places(places_delta),
+            "gapfront": fmt_gap_delta(gap_delta),
+        })
+
+    # Initialize session selection; ensure leader selected
     if "plot_checks" not in st.session_state:
-        st.session_state.plot_checks = {nm: False for nm in view["Athlete"]}
-        if len(view):
-            st.session_state.plot_checks[view.iloc[0]["Athlete"]] = True
+        st.session_state.plot_checks = {r["athlete"]: False for r in rows}
+        if rows:
+            st.session_state.plot_checks[rows[0]["athlete"]] = True
     else:
-        if len(view):
-            st.session_state.plot_checks.setdefault(view.iloc[0]["Athlete"], True)
+        if rows:
+            st.session_state.plot_checks.setdefault(rows[0]["athlete"], True)
 
-    # CSS for table, merged headers, alignment
-    st.markdown("""
-        <style>
-        .lb-wrap { position: relative; border: 1px solid rgba(0,0,0,0.08); border-radius: 6px; }
-        .lb-scroll { max-height: 460px; overflow-y: auto; }
-        table.lb { border-collapse: collapse; width: 100%; table-layout: fixed; font-size: 14px; }
-        table.lb th, table.lb td { padding: 8px; border-bottom: 1px solid rgba(0,0,0,0.06); vertical-align: middle; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-        thead th { position: sticky; top: 0; background: #fff; z-index: 2; border-bottom: 1px solid rgba(0,0,0,0.15); }
-        thead tr.top th { height: 28px; font-weight: 700; }
-        thead tr.bottom th { height: 28px; font-weight: 600; border-bottom: 1px solid rgba(0,0,0,0.08); }
+    # Hidden input to receive selection payload from the component
+    sel_payload = st.text_input("sel_payload", value="", key="sel_payload", label_visibility="collapsed")
 
-        /* Center all headings except first */
-        thead th { text-align: center; }
-        thead th.col-athlete { text-align: left; }
+    # If the component posted a selection payload, update session_state
+    if sel_payload:
+        try:
+            selected_names = set(json.loads(sel_payload))
+            for r in rows:
+                st.session_state.plot_checks[r["athlete"]] = r["athlete"] in selected_names
+        except Exception:
+            pass  # ignore malformed
 
-        /* Fixed widths + cell alignment (center under centered headings) */
-        .col-athlete  { width: 26%; text-align: left; }
-        .col-latest   { width: 24%; text-align: center; }
-        .col-gap      { width: 16%; text-align: center; }
-        .col-places   { width: 12%; text-align: center; }
-        .col-gapfront { width: 14%; text-align: center; }
-        .col-plot     { width: 8%;  text-align: center; }
+    # Build data payload for component (rows + current selection map)
+    payload = {
+        "rows": rows,
+        "selected": st.session_state.plot_checks,
+    }
+    payload_json = json.dumps(payload, ensure_ascii=False)
 
-        /* Pills and text colors */
-        .pill-pos { display:inline-block; padding: 2px 8px; border-radius: 999px; background:#1aa260; color:#fff; font-weight:700; }
-        .pill-neg { display:inline-block; padding: 2px 8px; border-radius: 999px; background:#d93025; color:#fff; font-weight:700; }
-        .txt-pos  { color:#1aa260; font-weight:700; }
-        .txt-neg  { color:#d93025; font-weight:700; }
-        .txt-zero { color:#111;    font-weight:700; }
-        </style>
-    """, unsafe_allow_html=True)
-
-    # Render table header
-    st.markdown("""
-    <div class="lb-wrap">
-      <div class="lb-scroll">
-        <table class="lb">
-          <thead>
-            <tr class="top">
-              <th class="col-athlete" rowspan="2">Athlete</th>
-              <th class="col-latest"  rowspan="2">Latest split</th>
-              <th class="col-gap"     rowspan="2">Time behind leader</th>
-              <th colspan="2">Change since last split</th>
-              <th class="col-plot"    rowspan="2">Plot</th>
-            </tr>
-            <tr class="bottom">
-              <th class="col-places">Places</th>
-              <th class="col-gapfront">Gap to in front</th>
-            </tr>
-          </thead>
-          <tbody>
-    """, unsafe_allow_html=True)
-
-    # Render each row and place a real Streamlit checkbox for selection
-    for i, r in view.iterrows():
-        nm = r["Athlete"]
-        places_txt, places_cls = fmt_places(r["Places_delta"])
-        gap_txt, gap_cls = fmt_gap_delta(r["Gap_to_in_front_delta"])
-
-        places_html = f'<span class="{places_cls}">{places_txt}</span>' if places_txt else ""
-        gap_html = f'<span class="{gap_cls}">{gap_txt}</span>' if gap_txt else ""
-
-        st.markdown(f"""
-            <tr>
-              <td class="col-athlete">{nm}</td>
-              <td class="col-latest">{r["Latest split"]}</td>
-              <td class="col-gap">{r["Time behind leader"]}</td>
-              <td class="col-places">{places_html}</td>
-              <td class="col-gapfront">{gap_html}</td>
-              <td class="col-plot">
-                <!-- Placeholder cell; checkbox rendered by Streamlit after this HTML -->
-              </td>
-            </tr>
-        """, unsafe_allow_html=True)
-
-        # Real Streamlit widget for robust selection
-        key = f"plot_sel__{nm}"
-        current = bool(st.session_state.plot_checks.get(nm, False))
-        st.session_state.plot_checks[nm] = st.checkbox("", key=key, value=current, label_visibility="hidden")
-
-    # Close table
-    st.markdown("""
-          </tbody>
-        </table>
-      </div>
+    # Component HTML/JS (no Python interpolation inside)
+    html_payload = """
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<style>
+  :root {
+    --border: rgba(0,0,0,0.08);
+    --border-strong: rgba(0,0,0,0.15);
+    --pos: #1aa260;
+    --neg: #d93025;
+    --neutral: #111;
+  }
+  body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Arial, sans-serif; }
+  .wrap { border: 1px solid var(--border); border-radius: 6px; }
+  .scroll { max-height: 460px; overflow-y: auto; }
+  table.lb { border-collapse: collapse; width: 100%; table-layout: fixed; font-size: 14px; }
+  table.lb th, table.lb td { padding: 8px; border-bottom: 1px solid var(--border); vertical-align: middle; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  thead th { position: sticky; top: 0; background: #fff; z-index: 2; border-bottom: 1px solid var(--border-strong); }
+  thead tr.top th { height: 28px; font-weight: 700; }
+  thead tr.bottom th { height: 28px; font-weight: 600; border-bottom: 1px solid var(--border); }
+  /* Headings: center all except first */
+  thead th { text-align: center; }
+  thead th.col-athlete { text-align: left; }
+  /* Fixed column widths and centered data under centered headings */
+  .col-athlete  { width: 26%; text-align: left; }
+  .col-latest   { width: 24%; text-align: center; }
+  .col-gap      { width: 16%; text-align: center; }
+  .col-places   { width: 12%; text-align: center; }
+  .col-gapfront { width: 14%; text-align: center; }
+  .col-plot     { width: 8%;  text-align: center; }
+  /* Pills and text */
+  .pill { display:inline-block; padding: 2px 8px; border-radius: 999px; color:#fff; font-weight:700; }
+  .pill.pos { background: var(--pos); }
+  .pill.neg { background: var(--neg); }
+  .txt.pos  { color: var(--pos); font-weight:700; }
+  .txt.neg  { color: var(--neg); font-weight:700; }
+  .txt.zero { color: var(--neutral); font-weight:700; }
+  .sel-box { transform: scale(1.2); cursor: pointer; }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="scroll">
+      <table class="lb" aria-label="Leaderboard">
+        <thead>
+          <tr class="top">
+            <th class="col-athlete" rowspan="2">Athlete</th>
+            <th class="col-latest"  rowspan="2">Latest split</th>
+            <th class="col-gap"     rowspan="2">Time behind leader</th>
+            <th colspan="2">Change since last split</th>
+            <th class="col-plot"    rowspan="2">Plot</th>
+          </tr>
+          <tr class="bottom">
+            <th class="col-places">Places</th>
+            <th class="col-gapfront">Gap to in front</th>
+          </tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
     </div>
-    """, unsafe_allow_html=True)
+  </div>
 
-    # Build selected list for plot
+  <script>
+    const payload = __PAYLOAD__;
+    const rows = payload.rows || [];
+    const selected = Object.assign({}, payload.selected || {});
+
+    function pillHTML(p) {
+      if (!p || p.type === 'none') return '';
+      if (p.type === 'pos')  return `<span class="pill pos">${p.text}</span>`;
+      if (p.type === 'neg')  return `<span class="pill neg">${p.text}</span>`;
+      if (p.type === 'zero') return `<span class="txt zero">—</span>`;
+      return '';
+    }
+
+    function gapHTML(g) {
+      if (!g || g.type === 'none') return '';
+      if (g.type === 'pos')  return `<span class="txt pos">${g.text}</span>`;
+      if (g.type === 'neg')  return `<span class="txt neg">${g.text}</span>`;
+      if (g.type === 'zero') return `<span class="txt zero">—</span>`;
+      return '';
+    }
+
+    function renderRows() {
+      const tbody = document.getElementById('rows');
+      tbody.innerHTML = '';
+      for (const r of rows) {
+        const isChecked = !!selected[r.athlete];
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td class="col-athlete">${r.athlete}</td>
+          <td class="col-latest">${r.latest}</td>
+          <td class="col-gap">${r.gap}</td>
+          <td class="col-places">${pillHTML(r.places)}</td>
+          <td class="col-gapfront">${gapHTML(r.gapfront)}</td>
+          <td class="col-plot"><input type="checkbox" class="sel-box" data-athlete="${r.athlete}" ${isChecked ? 'checked' : ''} /></td>
+        `;
+        tbody.appendChild(tr);
+      }
+    }
+
+    function postSelection() {
+      const names = [];
+      for (const k in selected) { if (selected[k]) names.push(k); }
+      // Write into the hidden input 'sel_payload' in the parent Streamlit app
+      const txts = window.parent.document.querySelectorAll('input[type="text"][id^="sel_payload"]');
+      if (txts && txts.length) {
+        const el = txts[0];
+        el.value = JSON.stringify(names);
+        // Trigger input event so Streamlit picks it up
+        const evt = new Event('input', { bubbles: true });
+        el.dispatchEvent(evt);
+      }
+    }
+
+    document.addEventListener('change', (e) => {
+      if (e.target && e.target.matches('input.sel-box')) {
+        const athlete = e.target.getAttribute('data-athlete');
+        selected[athlete] = e.target.checked;
+        postSelection();
+      }
+    });
+
+    renderRows();
+    // Initial sync so Streamlit has the current selection
+    postSelection();
+  </script>
+</body>
+</html>
+    """.replace("__PAYLOAD__", payload_json)
+
+    components.html(html_payload, height=520, scrolling=False)
+
+    # Build selected list for plot from session_state
     selected = [nm for nm, on in st.session_state.plot_checks.items() if on]
+    
     
 # 6) Plot controls
 splits_present = list(df["split"].cat.categories)
@@ -437,7 +514,7 @@ else:
 
     fig = go.Figure()
 
- # 8) Plot
+# 8) Plot
 if not plot_df.empty:
     leaders2 = compute_leader(df)
     xy = plot_df.merge(leaders2, on="split", how="left").dropna(subset=["net_td", "leader_td"])
@@ -447,7 +524,7 @@ if not plot_df.empty:
 
     fig = go.Figure()
 
-    # 8.1) Main athlete lines
+    # 8.1) Main athlete lines (legend off)
     for nm, g in xy.groupby("name", sort=False):
         g = g.sort_values("leader_hr")
         fig.add_trace(go.Scatter(
@@ -455,7 +532,7 @@ if not plot_df.empty:
             mode="lines",
             name=str(nm),
             line=dict(width=1.8),
-            showlegend=False,  # hide legend
+            showlegend=False,
             hovertemplate="Athlete: %{text}<br>Split: %{meta}<br>Leader elapsed: %{x:.2f} h<br>Behind: %{y:.1f} min",
             text=[nm] * len(g),
             meta=g["split_label"],
@@ -518,14 +595,14 @@ if not plot_df.empty:
             mode="lines",
             line=dict(color=color, width=1.6, dash="solid"),
             name=anchor,
-            showlegend=False,  # keep off
+            showlegend=False,
             hovertemplate=anchor + " at leader elapsed: %{x:.2f} h",
         ))
 
     fig.update_layout(
         height=520,
         margin=dict(l=10, r=10, t=30, b=30),
-        showlegend=False,  # ensure no legend
+        showlegend=False,
         annotations=annotations
     )
     st.plotly_chart(fig, use_container_width=True)
